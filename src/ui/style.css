@@ -1,0 +1,154 @@
+/* =========================================================================
+   ExposomeSim — house style.
+   A scientific instrument on aged paper: warm sepia ground, black ink,
+   meshlike line-work. No gradients, no shadows, no chrome. Restraint.
+   ========================================================================= */
+
+:root {
+  --paper:        #e9dec4;   /* aged sepia ground */
+  --paper-deep:   #ded2b4;   /* recessed panels  */
+  --ink:          #20180f;   /* near-black ink   */
+  --ink-soft:     #5b4d38;   /* secondary text   */
+  --ink-faint:    #9b8a68;   /* gridlines, ticks */
+  --line:         rgba(32, 24, 15, 0.78);
+  --line-faint:   rgba(32, 24, 15, 0.16);
+  --accent:       #7a1f12;   /* oxblood — used sparingly for alarm/peaks */
+  --good:         #355e3b;   /* deep green — contentment/reward */
+
+  --mono: "iA Writer Mono", "SFMono-Regular", ui-monospace, "JetBrains Mono", Menlo, monospace;
+  --serif: "Hoefler Text", "Iowan Old Style", Palatino, "Times New Roman", serif;
+
+  --u: 8px;                  /* base spacing unit */
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* subtle paper grain via layered noise-free gradients (kept flat & cheap) */
+body::before {
+  content: "";
+  position: fixed; inset: 0;
+  background:
+    radial-gradient(120% 120% at 30% -10%, rgba(255,250,235,0.5), transparent 55%),
+    radial-gradient(120% 120% at 110% 120%, rgba(120,95,55,0.18), transparent 50%);
+  pointer-events: none;
+  mix-blend-mode: multiply;
+}
+
+#app {
+  display: grid;
+  grid-template-columns: 1fr 360px;
+  grid-template-rows: 44px 1fr;
+  grid-template-areas:
+    "title title"
+    "stage dash";
+  height: 100vh;
+}
+
+/* ---- title bar ---- */
+#titlebar {
+  grid-area: title;
+  display: flex; align-items: baseline; gap: calc(var(--u) * 2);
+  padding: 0 calc(var(--u) * 2);
+  border-bottom: 1px solid var(--line);
+}
+#titlebar .mark {
+  font-weight: 700; letter-spacing: 0.42em; font-size: 14px;
+}
+#titlebar .sub {
+  font-family: var(--serif); font-style: italic; color: var(--ink-soft); font-size: 13px;
+}
+#titlebar .clock {
+  margin-left: auto; font-variant-numeric: tabular-nums; letter-spacing: 0.12em;
+  color: var(--ink-soft);
+}
+
+/* ---- stage / 3D ---- */
+#stage { grid-area: stage; position: relative; overflow: hidden; }
+#scene { display: block; width: 100%; height: 100%; }
+#caption {
+  position: absolute; left: calc(var(--u) * 3); bottom: calc(var(--u) * 3);
+  max-width: 60ch; font-family: var(--serif); font-size: 15px; line-height: 1.5;
+  color: var(--ink); text-shadow: 0 1px 0 rgba(233,222,196,0.8);
+}
+#caption .who { font-family: var(--mono); font-size: 11px; letter-spacing: 0.2em;
+  text-transform: uppercase; color: var(--ink-soft); display: block; margin-bottom: 4px; }
+
+/* ---- dashboard ---- */
+#dashboard {
+  grid-area: dash;
+  border-left: 1px solid var(--line);
+  background: var(--paper-deep);
+  padding: calc(var(--u) * 2);
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: calc(var(--u) * 2);
+}
+#dashboard::-webkit-scrollbar { width: 8px; }
+#dashboard::-webkit-scrollbar-thumb { background: var(--line-faint); }
+
+.panel { border: 1px solid var(--line); padding: calc(var(--u) * 1.5); }
+.panel > h2 {
+  margin: 0 0 var(--u); font-size: 10px; font-weight: 600;
+  letter-spacing: 0.28em; text-transform: uppercase; color: var(--ink-soft);
+}
+.panel canvas { display: block; width: 100%; }
+
+.readout-emotion {
+  font-family: var(--serif); font-size: 22px; font-style: italic;
+}
+.kv { display: flex; justify-content: space-between; font-size: 11px; color: var(--ink-soft); }
+.kv b { color: var(--ink); font-weight: 600; }
+
+/* ---- brain panel (neuroanatomy · soma vector) ---- */
+.toggle {
+  margin-left: auto;
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.2em; text-transform: uppercase;
+  color: var(--ink-soft); background: transparent; border: 1px solid var(--line);
+  padding: 2px 8px; cursor: pointer; align-self: center;
+}
+.toggle:hover { color: var(--paper); background: var(--ink); }
+.toggle.off { opacity: 0.5; }
+
+.brain-stage { position: relative; width: 100%; height: 300px; }
+.brain-panel canvas { height: 300px; cursor: grab; touch-action: none; }
+.brain-panel canvas:active { cursor: grabbing; }
+.brain-overlay { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.brain-leaders { position: absolute; inset: 0; width: 100%; height: 100%; }
+.brain-leaders line { stroke: var(--ink); stroke-width: 0.75; opacity: 0.7; }
+.brain-leaders circle { fill: var(--ink); }
+.brain-label {
+  position: absolute; max-width: 46%;
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.06em;
+  color: var(--ink); background: rgba(233,222,196,0.82); padding: 0 3px;
+  transform: translateY(-50%); white-space: nowrap; line-height: 1.35;
+}
+.brain-lit {
+  font-size: 10px; letter-spacing: 0.04em; color: var(--accent);
+  min-height: 13px; margin: 5px 0 2px;
+}
+.soma-list { list-style: none; margin: var(--u) 0 0; padding: 0; max-height: 240px; overflow-y: auto; }
+.soma-list::-webkit-scrollbar { width: 8px; }
+.soma-list::-webkit-scrollbar-thumb { background: var(--line-faint); }
+.soma-group {
+  font-size: 10px; letter-spacing: 0.28em; text-transform: uppercase;
+  color: var(--ink-soft); margin: 8px 0 2px;
+}
+.soma-row {
+  display: flex; justify-content: space-between; gap: 8px;
+  font-size: 11px; color: var(--ink-soft); padding: 1px 4px; cursor: pointer;
+}
+.soma-row:hover { background: var(--line-faint); }
+.soma-row b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.soma-row.sel { background: var(--ink); color: var(--paper); }
+.soma-row.sel b { color: var(--paper); }

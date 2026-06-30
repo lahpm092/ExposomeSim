@@ -1,0 +1,22 @@
+{
+  "name": "exposome-sim",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Neurosymbolic exposome simulator — an LLM-driven character on a dynamical limbic/endocrine substrate, prototyped as a fast-food cashier.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "three": "^0.171.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.171.0",
+    "playwright": "^1.61.1",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.7"
+  }
+}

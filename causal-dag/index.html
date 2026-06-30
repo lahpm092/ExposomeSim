@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Exposome — causal structure</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<style>
+  :root{
+    --paper:#e9dec4; --paper-deep:#e3d6b8; --paper-card:#efe7d3;
+    --ink:#1a1a1a; --ink-soft:#5a5142; --oxblood:#7a1f12; --hair:#b7a980;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;}
+  body{
+    background:var(--paper); color:var(--ink);
+    font-family:"Avenir Next","Helvetica Neue",Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased; overflow:hidden;
+  }
+  header{position:fixed;top:0;left:0;right:0;padding:20px 34px 12px;z-index:6;pointer-events:none;}
+  h1{font-size:13px;font-weight:600;letter-spacing:.34em;text-transform:uppercase;margin:0;}
+  h1 .sep{color:var(--oxblood);margin:0 .5em;}
+  .sub{margin:6px 0 0;font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-soft);font-style:italic;}
+  #stage{width:100vw;height:100vh;display:block;}
+
+  .node rect{fill:var(--paper-deep);stroke:var(--ink);stroke-width:1.4;transition:stroke .15s,stroke-width .15s,fill .15s;cursor:pointer;}
+  .node.kind-soma rect{fill:#ddcfa9;stroke-width:2;}
+  .node.kind-gain rect{fill:none;stroke:var(--oxblood);stroke-dasharray:5 4;}
+  .node.kind-family rect{fill:#e7dcc0;stroke-dasharray:1 0;}
+  .node .title{font-size:11px;font-weight:600;letter-spacing:.11em;text-transform:uppercase;fill:var(--ink);text-anchor:middle;dominant-baseline:middle;pointer-events:none;}
+  .node.kind-gain .title{fill:var(--oxblood);}
+  .node .desc{font-size:8.5px;letter-spacing:.04em;fill:var(--ink-soft);text-anchor:middle;dominant-baseline:middle;pointer-events:none;}
+  .node.clickable .title::after{content:'';}
+  .expandmark{font-size:9px;fill:var(--oxblood);text-anchor:middle;pointer-events:none;}
+
+  .edge{fill:none;stroke:var(--ink);stroke-width:1.2;opacity:.6;transition:opacity .15s,stroke-width .15s;}
+  .edge.mod{stroke:var(--oxblood);stroke-dasharray:5 4;opacity:.55;}
+  .edge.loop{stroke:var(--ink-soft);stroke-dasharray:2 4;opacity:.5;}
+  .edge.neg{stroke:var(--oxblood);opacity:.5;}
+  .elabel{font-size:7.5px;letter-spacing:.06em;fill:var(--ink-soft);text-anchor:middle;opacity:0;transition:opacity .15s;}
+  .elabel.always{opacity:.6;}
+
+  .dim .edge{opacity:.07 !important;}
+
+  /* info panel — full-width bottom strip so it never sits over the graph */
+  #panel{
+    position:fixed;left:28px;right:28px;bottom:16px;z-index:7;
+    background:var(--paper-card);border:1.4px solid var(--ink);
+    padding:12px 22px 12px;box-shadow:4px 5px 0 rgba(26,26,26,.10);
+    display:grid;grid-template-columns:300px 1fr;column-gap:26px;align-items:start;
+    max-height:168px;overflow:hidden;transition:opacity .15s;
+  }
+  #panel .pleft{border-right:1px solid var(--hair);padding-right:22px;}
+  #panel .ptag{font-size:9px;letter-spacing:.24em;text-transform:uppercase;color:var(--oxblood);margin-bottom:6px;}
+  #panel .ptitle{font-size:15px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;line-height:1.2;}
+  #panel .phint{font-size:9.5px;letter-spacing:.05em;color:var(--ink-soft);margin-top:10px;font-style:italic;}
+  #panel .pbody{font-size:12px;line-height:1.5;color:var(--ink);align-self:center;}
+
+  /* back affordance */
+  #back{
+    position:fixed;top:72px;left:34px;z-index:7;display:none;cursor:pointer;
+    font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--oxblood);
+    border-bottom:1px solid var(--oxblood);padding-bottom:2px;pointer-events:auto;
+  }
+  #detailTitle{
+    position:fixed;top:96px;left:34px;z-index:6;display:none;pointer-events:none;
+    font-size:12px;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--ink);
+  }
+  footer{position:fixed;top:74px;right:34px;z-index:6;pointer-events:none;
+    font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-soft);text-align:right;}
+  footer .accent{color:var(--oxblood);}
+</style>
+</head>
+<body>
+<header>
+  <h1>Exposome<span class="sep">·</span>causal structure</h1>
+  <p class="sub">hover a node to read what it does <span style="color:#7a1f12">·</span> click a node to open its inner mechanism</p>
+</header>
+<div id="back">← back to whole system</div>
+<div id="detailTitle"></div>
+<svg id="stage"></svg>
+
+<div id="panel">
+  <div class="pleft">
+    <div class="ptag" id="ptag">the system</div>
+    <div class="ptitle" id="ptitle">A character that lives in numbers</div>
+    <div class="phint" id="phint">Hover any box. Boxes marked <span style="color:#7a1f12">⊕</span> open a deeper view on click.</div>
+  </div>
+  <div class="pbody" id="pbody">A world event is felt twice — once instantly by the body (low road), once interpreted by the LLM, which appraises it (SEC/OCC) and chooses how to cope. Both routes inject impulses into the <em>soma</em>: a persistent set of limbic, neuromodulator, hormone and drive variables that keep evolving as coupled stochastic equations. Core affect is read off the soma, the discrete emotion is constructed from it, the integrals accumulate the lived dose, and the felt state is fed back as the next prompt.</div>
+</div>
+
+<footer>
+  solid = causal flow <span class="accent">·</span> red dashed = gain / modulation <span class="accent">·</span> dotted = feedback
+</footer>
+
+<script>
+const W = 1600, H = 960;
+
+// ---- TOP-LEVEL GRAPH --------------------------------------------------------
+const NODES = [
+  {id:'event', cx:110, cy:480, t:'World event', d:'rude · order · compliment',
+   long:'The world hands the character a typed event: a natural-language description plus two crude "fast tags" — salienceHint (how attention-grabbing) and valenceHint (good/bad) — that reach the body before any thinking happens.', kind:'io'},
+  {id:'lowroad', cx:330, cy:300, t:'Low road', d:'fast pre-cognitive kick',
+   long:'LeDoux\'s fast path. Before the LLM has interpreted anything, the event\'s crude tags kick the body directly — so a rude customer jolts the cashier a beat before she has understood why.'},
+  {id:'llm', cx:330, cy:660, t:'LLM driver', d:'Qwen interprets event',
+   long:'Qwen-0.6B is the stateless cognition. It reads the felt body state, recalled memories and the event, and must return strict JSON: a structured appraisal, a chosen regulation strategy, and a spoken line. A soma-derived fallback keeps the sim alive if it fails.'},
+  {id:'genotype', cx:560, cy:110, t:'Genotype × profile', d:'gain field · deriveParams', kind:'gain', w:200,
+   long:'The individuating layer. Genes × Big Five (CB5T) × experiosome (attachment, childhood adversity, SES) map to a handful of interpretable gain knobs. They don\'t rewire anything — they scale how hard every event lands and how slowly it fades. This is why the same rude customer wounds Mara more than a secure person.'},
+  {id:'appraisal', cx:560, cy:600, t:'Appraisal (SEC/OCC)', d:'10 scored dimensions', w:185,
+   long:'The structured meaning of the event, scored by the LLM on 10 dimensions from Scherer\'s stimulus-evaluation checks and the OCC model (novelty, pleasantness, goal relevance/congruence, agency, blame, coping, certainty, norms, urgency). These numbers are what get translated into physiology.'},
+  {id:'regul', cx:560, cy:800, t:'Regulation', d:'Gross strategy',
+   long:'Having appraised, the LLM also picks how to cope. Each of Gross\'s strategies reshapes the somatic impulse differently — and some (suppression, rumination) cost the body even when they look outwardly calm.'},
+  {id:'applyApp', cx:820, cy:520, t:'applyAppraisal', d:'kicks → soma vars', w:165,
+   long:'The deterministic translator. It reads the 10 appraisal scores and the genotype gains, computes emotion-family intensities (threat, reward, anger, warmth, grief), and injects one-shot impulses into specific soma variables.'},
+  {id:'applyReg', cx:820, cy:740, t:'applyRegulation', d:'modulates the kicks', w:175,
+   long:'Runs just after the appraisal kicks. It either scales existing activations down (mul) or adds new load (add) — e.g. reappraisal multiplies the amygdala down while suppression adds cortisol and fatigue.'},
+  {id:'integrate', cx:1075, cy:300, t:'integrate()', d:'SDEs · circadian · HPA',
+   long:'The physics tick. Every frame the substrate advances by Euler–Maruyama integration of coupled mean-reverting (Ornstein–Uhlenbeck) SDEs, with circadian set-points, the cross-channel coupling graph, and stochastic noise — sub-stepped at ≤0.02h for stability.'},
+  {id:'soma', cx:1075, cy:540, t:'Soma', d:'limbic · neuromods · hormones', kind:'soma', w:200, h:84,
+   long:'The persistent self — the ~34 numbers that ARE the character between LLM calls: limbic activations, neuromodulator tone, hormones, Panksepp drives, plus slow exposome variables (allostatic load, fatigue). The LLM is stateless; continuity lives here.'},
+  {id:'affect', cx:1330, cy:470, t:'Core affect', d:'valence · arousal · dominance', w:175,
+   long:'The constructed-emotion seam (Barrett). Three numbers derived from the whole substrate — valence, arousal, dominance — are the low-dimensional summary the body "feels" and the only somatic state the LLM is shown.'},
+  {id:'emotion', cx:1490, cy:300, t:'readEmotion', d:'discrete label', w:150,
+   long:'Constructs a discrete emotion label by partitioning the valence×arousal×dominance space, refined by Panksepp drives. Grounded in the body, not in what the LLM says — so the metric measures the substrate, not the prose.'},
+  {id:'integrals', cx:1490, cy:540, t:'Integrals', d:'∫cortisol · allostatic load', w:165,
+   long:'Time-integrals over affective-state membership — the dependent variables of the study. They turn momentary states into a cumulative dose: minutes anxious/depressed/content, total stress exposure, total reward, allostatic load.'},
+  {id:'memory', cx:1490, cy:760, t:'Memory', d:'salience-gated stream',
+   long:'An affect-gated episodic stream (Generative Agents style). Events are stored with salience set by arousal×cortisol — so emotionally hot moments stick — then decay over time and are retrieved by recency × salience × relevance to seed the next prompt.'},
+  {id:'prompt', cx:830, cy:110, t:'Next prompt', d:'felt state → LLM', kind:'io', w:165,
+   long:'Closes the loop. The current felt state is rendered into first-person interoceptive language ("my chest is tight, I feel on edge"), bundled with recalled memories, and handed back to the LLM as context for the next beat. The body\'s history reaches cognition only through this felt summary.'},
+];
+
+// compress the vertical span so nothing sits behind the bottom info strip
+NODES.forEach(n=>{ n.cy = 150 + (n.cy-110)/(800-110)*(700-150); });
+
+const EDGES = [
+  {s:'event', t:'lowroad', l:'salience hint'}, {s:'event', t:'llm', l:'description'},
+  {s:'lowroad', t:'soma', l:'amygdala spike'},
+  {s:'llm', t:'appraisal'}, {s:'llm', t:'regul'},
+  {s:'appraisal', t:'applyApp'}, {s:'regul', t:'applyReg'},
+  {s:'genotype', t:'applyApp', type:'mod', l:'gain'},
+  {s:'genotype', t:'applyReg', type:'mod', l:'controlGain'},
+  {s:'genotype', t:'integrate', type:'mod', l:'hpa · recovery'},
+  {s:'applyApp', t:'soma', l:'kicks'},
+  {s:'applyReg', t:'applyApp', type:'mod', l:'dampen / sustain'},
+  {s:'applyReg', t:'soma', l:'cost'},
+  {s:'integrate', t:'soma', l:'advance'}, {s:'soma', t:'integrate', type:'loop'},
+  {s:'soma', t:'affect', l:'derive'}, {s:'affect', t:'emotion'}, {s:'affect', t:'integrals'},
+  {s:'soma', t:'integrals', l:'∫ over time'}, {s:'soma', t:'memory', l:'arousal×cortisol'},
+  {s:'emotion', t:'memory'},
+  {s:'soma', t:'prompt', type:'loop', l:'interoception'},
+  {s:'emotion', t:'prompt', type:'loop'}, {s:'memory', t:'prompt', type:'loop'},
+  {s:'prompt', t:'llm', type:'loop', l:'feedback'},
+];
+
+// ---- DETAIL SUB-GRAPHS (auto-laid out by rank) ------------------------------
+const DETAIL = {
+  event: {
+    nodes:[
+      {id:'kind', t:'Event kind', d:'arrive / order / rude…', rank:0, long:'The discrete type of event: customer_arrive, order, rude, compliment, complaint, rush, mistake, idle, shift_end. The kind fixes the description and the two fast tags.'},
+      {id:'desc', t:'Description', d:'natural language', rank:1, long:'A natural-language line ("a man in a hard hat snaps at you to hurry up") handed verbatim to the LLM as the thing to react to.'},
+      {id:'sal', t:'salienceHint', d:'0..1 grab', rank:1, long:'How attention-grabbing the event is, 0..1 — drives the pre-cognitive low-road kick before the LLM responds.'},
+      {id:'val', t:'valenceHint', d:'−1..1 good/bad', rank:1, long:'A crude good/bad sign, −1..1 — a negative tag with high salience is what fires the amygdala on the low road.'},
+    ],
+    edges:[{s:'kind',t:'desc'},{s:'kind',t:'sal'},{s:'kind',t:'val'}],
+  },
+  lowroad: {
+    nodes:[
+      {id:'sal', t:'salienceHint', d:'sal', rank:0, kind:'family', long:'The event\'s crude salience, scaled into autonomic arousal channels regardless of meaning.'},
+      {id:'val', t:'valenceHint', d:'val', rank:0, kind:'family', long:'The event\'s crude valence — only a negative value (with salience) drives the amygdala; a positive value gives a small reward blip.'},
+      {id:'ne', t:'norepinephrine', d:'+= sal·0.30', rank:1, long:'Alertness rises with salience — the orienting/vigilance response.'},
+      {id:'epi', t:'epinephrine', d:'+= sal·0.40', rank:1, long:'Adrenaline surge — the fastest autonomic component of the startle.'},
+      {id:'insula', t:'insula', d:'+= sal·0.30', rank:1, long:'Interoceptive cortex lights up — the "something just happened in my body" signal.'},
+      {id:'amyg', t:'amygdala', d:'+= sal·0.45·gain·(−val)', rank:1, kind:'gain', long:'Threat alarm — fires only for negative-valence events, and is scaled by amygdalaGain, so anxious profiles spike harder for the identical event.'},
+      {id:'nacc', t:'nacc', d:'+= val·0.30·reward', rank:1, long:'A quick reward blip for positive events, scaled by rewardSensitivity.'},
+    ],
+    edges:[{s:'sal',t:'ne'},{s:'sal',t:'epi'},{s:'sal',t:'insula'},{s:'val',t:'amyg',type:'mod'},{s:'sal',t:'amyg'},{s:'val',t:'nacc'}],
+  },
+  llm: {
+    nodes:[
+      {id:'build', t:'buildMessages', d:'prompt + schema', rank:0, long:'Assembles a role-play system prompt, the interoception render, recalled memories and the event, plus a strict JSON schema the tiny model must fill.'},
+      {id:'call', t:'Ollama call', d:'think:false · json', rank:1, long:'POST to local Ollama: think:false and format:"json" (critical for Qwen3 — otherwise it spends its budget "thinking" and returns empty), num_predict 280, temp 0.6.'},
+      {id:'parse', t:'parseResponse', d:'extract + coerce', rank:2, long:'Tolerantly extracts the JSON object and coerces the appraisal fields into valid ranges — robust to a 0.6B model\'s formatting slips.'},
+      {id:'fallback', t:'fallbackResponse', d:'soma-derived', rank:2, kind:'family', long:'If parsing fails, an appraisal is synthesised from the current soma so the body still receives a coherent kick and the simulation never stalls.'},
+    ],
+    edges:[{s:'build',t:'call'},{s:'call',t:'parse'},{s:'call',t:'fallback',l:'on fail'}],
+  },
+  genotype: {
+    nodes:[
+      {id:'genes', t:'Genotype', d:'COMT · DRD2 · 5-HTTLPR…', rank:0, kind:'family', long:'Candidate-gene dosages used as interpretable knobs, not determinism: COMT_Met, DRD2_Taq1A, 5-HTTLPR_S, FKBP5_risk, DRD4_7R, OXTR_A, BDNF_Met, DAT1, MAOA, CYP2D6.'},
+      {id:'big5', t:'Big Five (CB5T)', d:'N E C A O', rank:0, kind:'family', long:'DeYoung\'s CB5T ties traits to systems: N↔threat/serotonin, E↔dopamine/reward, C↔prefrontal control, A↔oxytocin/empathy, O↔dopaminergic flexibility.'},
+      {id:'expo', t:'Experiosome', d:'attachment · ACE · SES', rank:0, kind:'family', long:'The lived-experience distribution: attachment style, childhood adversity (ACE score), socioeconomic status, chronic stressors — the population layer of the model.'},
+      {id:'amygGain', t:'amygdalaGain', d:'threat reactivity', rank:1, kind:'gain', long:'= f(↑N, ↑5-HTTLPR-S, ↑ACE, attachment threat-bias, ↓SES). Scales every threat/low-road amygdala kick. Mara\'s ≈ 2.04.'},
+      {id:'hpa', t:'hpaFeedbackGain', d:'cortisol shut-off', rank:1, kind:'gain', long:'How fast cortisol is switched off (FKBP5, ACE). Lower = stress lingers. Multiplies cortisol\'s decay rate.'},
+      {id:'reward', t:'rewardSensitivity', d:'dopamine response', rank:1, kind:'gain', long:'= f(↑E, DRD4_7R, D2 density). Scales reward/nacc/dopamine kicks. Low D2 (Mara) blunts reward → anhedonic tilt.'},
+      {id:'control', t:'controlGain', d:'prefrontal brake', rank:1, kind:'gain', long:'= f(↑C, COMT, ↓ACE). Strength of vmPFC/dlPFC top-down regulation — how effective reappraisal is.'},
+      {id:'recovery', t:'recoveryRate', d:'how fast it fades', rank:1, kind:'gain', long:'= f(↓N, ↑C). Multiplies decay of amygdala/FEAR/RAGE/grief — low recovery means emotions ring on.'},
+      {id:'oxt', t:'oxytocinGain', d:'affiliative warmth', rank:1, kind:'gain', long:'= f(↑A, OXTR, attachment). Scales warmth/oxytocin kicks — how much social contact soothes.'},
+    ],
+    edges:[
+      {s:'genes',t:'amygGain'},{s:'big5',t:'amygGain'},{s:'expo',t:'amygGain'},
+      {s:'genes',t:'hpa'},{s:'expo',t:'hpa'},
+      {s:'big5',t:'reward'},{s:'genes',t:'reward'},
+      {s:'big5',t:'control'},{s:'expo',t:'control'},
+      {s:'big5',t:'recovery'},
+      {s:'big5',t:'oxt'},{s:'expo',t:'oxt'},
+    ],
+  },
+  appraisal: {
+    nodes:[
+      {id:'novelty', t:'novelty', d:'0..1', rank:0, long:'Unexpectedness (Scherer SEC #1). Drives orienting: norepinephrine + SEEKING, and can add PLAY to a reward.'},
+      {id:'pleasant', t:'pleasantness', d:'−1..1', rank:0, long:'Gut-level intrinsic valence, independent of goals (Scherer SEC #2).'},
+      {id:'relevance', t:'goalRelevance', d:'0..1', rank:0, long:'Does this matter to my goals at all? A gate — irrelevant events produce almost no kick (OCC desirability gate).'},
+      {id:'congruence', t:'goalCongruence', d:'−1..1', rank:0, long:'Helps (+) or harms (−) my goals. The sign that splits reward from threat.'},
+      {id:'agency', t:'agency', d:'self/other/circ.', rank:0, long:'Who caused it — self, another agent, or circumstance. Selects which emotion family is even possible (OCC agent axis).'},
+      {id:'blame', t:'blameworthiness', d:'−1..1', rank:0, long:'Praise … blame. With other-agency + harm, negative blame produces anger.'},
+      {id:'coping', t:'copingPotential', d:'0..1', rank:0, long:'Can I handle this? The challenge/overwhelm switch — high coping turns the same threat into approach, low coping into fear or grief.'},
+      {id:'certainty', t:'certainty', d:'0..1', rank:0, long:'How sure am I what is happening (Scherer). Low certainty sustains vigilance.'},
+      {id:'norm', t:'normCompatibility', d:'−1..1', rank:0, long:'Violates … upholds social norms. With other-agency + pleasant, positive norms produce warmth/affiliation.'},
+      {id:'urgency', t:'urgency', d:'0..1', rank:0, long:'Time pressure (Scherer). Amplifies the autonomic/arousal component.'},
+      {id:'threat', t:'→ threat', d:'rel·(−cong)·(1−cope)', rank:1, kind:'family', long:'threat = relevance · (−congruence) · (1−coping). Fires amygdala, FEAR, norepinephrine, cortisol. The fear family.'},
+      {id:'reward', t:'→ reward', d:'rel·cong·pleasant', rank:1, kind:'family', long:'reward = relevance · congruence · pleasantness. Fires nacc, dopamine, SEEKING. The approach family.'},
+      {id:'anger', t:'→ anger', d:'(−blame)·(−cong)', rank:1, kind:'family', long:'When agency=other & harmful & blamed: RAGE + norepinephrine. The anger family.'},
+      {id:'warmth', t:'→ warmth', d:'norm·pleasant', rank:1, kind:'family', long:'When agency=other & norm-upholding & pleasant: oxytocin, CARE, opioid. The affiliation family.'},
+      {id:'grief', t:'→ grief', d:'(−cong)·(1−cope)', rank:1, kind:'family', long:'When agency=circumstance & harmful & uncoped: PANIC_GRIEF, lowered serotonin & dopamine. The helplessness family.'},
+    ],
+    edges:[
+      {s:'relevance',t:'threat'},{s:'congruence',t:'threat'},{s:'coping',t:'threat'},
+      {s:'relevance',t:'reward'},{s:'congruence',t:'reward'},{s:'pleasant',t:'reward'},
+      {s:'agency',t:'anger'},{s:'blame',t:'anger'},{s:'congruence',t:'anger'},
+      {s:'agency',t:'warmth'},{s:'norm',t:'warmth'},{s:'pleasant',t:'warmth'},
+      {s:'agency',t:'grief'},{s:'congruence',t:'grief'},{s:'coping',t:'grief'},
+    ],
+  },
+  regul: {
+    nodes:[
+      {id:'reapp', t:'reappraisal', d:'reframe', rank:0, long:'vmPFC up, amygdala scaled down, cortisol −, small fatigue. The "healthy" strategy — and its strength is gated by controlGain, so a depleted/low-control person reframes less effectively.'},
+      {id:'supp', t:'suppression', d:'hide it', rank:0, long:'Hides the outward expression but the body still pays: norepinephrine + cortisol up, fatigue up. Looks calm, costs more.'},
+      {id:'rum', t:'rumination', d:'replay', rank:0, kind:'gain', long:'Re-enters the threat: amygdala, PANIC_GRIEF, cortisol and hippocampal encoding all rise — the maladaptive loop that re-stamps the memory.'},
+      {id:'distr', t:'distraction', d:'look away', rank:0, long:'amygdala ×0.8, dlPFC up — quick relief, no reframing.'},
+      {id:'accept', t:'acceptance', d:'allow', rank:0, long:'vmPFC + GABA up, amygdala ×0.9 — gentle down-regulation without effortful control.'},
+      {id:'situ', t:'situation-selection', d:'avoid', rank:0, long:'amygdala ×0.85, small fatigue — choosing not to be in the situation.'},
+    ],
+    edges:[],
+  },
+  applyReg: {
+    nodes:[
+      {id:'mul', t:'mul(channel, f)', d:'scale existing', rank:0, kind:'family', long:'Multiplies an existing activation down — how reappraisal/distraction/acceptance dampen the amygdala that the appraisal just raised.'},
+      {id:'add', t:'add(channel, d)', d:'new load', rank:0, kind:'family', long:'Adds a fresh impulse — how suppression and rumination pile on cortisol, norepinephrine and fatigue even while damping expression.'},
+      {id:'amyg', t:'amygdala', d:'scaled by strategy', rank:1, long:'The shared target: every strategy ultimately raises or lowers the amygdala the appraisal kicked — gated by controlGain for the prefrontal ones.'},
+      {id:'cost', t:'cortisol · fatigue', d:'the body\'s bill', rank:1, long:'The cost ledger: suppression and rumination leave cortisol and fatigue elevated — the physiological price of looking composed.'},
+    ],
+    edges:[{s:'mul',t:'amyg'},{s:'add',t:'cost'},{s:'add',t:'amyg'}],
+  },
+  applyApp: {
+    nodes:[
+      {id:'threat', t:'threat', d:'family', rank:0, kind:'family', long:'Intensity from the appraisal — scaled by amygdalaGain on the way in.'},
+      {id:'reward', t:'reward', d:'family', rank:0, kind:'family', long:'Scaled by rewardSensitivity.'},
+      {id:'anger', t:'anger', d:'family', rank:0, kind:'family', long:'From other-agency + blame.'},
+      {id:'warmth', t:'warmth', d:'family', rank:0, kind:'family', long:'Scaled by oxytocinGain.'},
+      {id:'grief', t:'grief', d:'family', rank:0, kind:'family', long:'From uncontrollable loss.'},
+      {id:'amyg', t:'amygdala+FEAR', d:'+cortisol +NE', rank:1, long:'Threat raises amygdala, FEAR, norepinephrine and cortisol — the fear/HPA package.'},
+      {id:'da', t:'nacc+da_meso', d:'+SEEKING', rank:1, long:'Reward raises accumbens, mesolimbic dopamine and SEEKING (and PLAY if novel) — the approach package.'},
+      {id:'rage', t:'RAGE', d:'+NE', rank:1, long:'Anger raises RAGE and norepinephrine.'},
+      {id:'oxt', t:'oxytocin+CARE', d:'+opioid', rank:1, long:'Warmth raises oxytocin, CARE and opioid — the affiliation/soothing package.'},
+      {id:'panic', t:'PANIC_GRIEF', d:'−5HT −DA', rank:1, long:'Grief raises PANIC_GRIEF and lowers serotonin and dopamine — the shutdown package.'},
+    ],
+    edges:[{s:'threat',t:'amyg'},{s:'reward',t:'da'},{s:'anger',t:'rage'},{s:'warmth',t:'oxt'},{s:'grief',t:'panic'}],
+  },
+  integrate: {
+    nodes:[
+      {id:'revert', t:'mean reversion', d:'k(base−x)', rank:0, long:'Each channel is pulled back toward its baseline at rate k — the Ornstein–Uhlenbeck restoring force. Fast channels (epinephrine) snap back; slow ones (cortisol) linger.'},
+      {id:'circ', t:'circadian forcing', d:'cos(2π(t−φ)/24)', rank:0, long:'The baseline itself breathes over the day: mean + amplitude·cos(2π(t−phase)/24). Cortisol peaks near waking (CAR), melatonin deep at night.'},
+      {id:'coup', t:'coupling graph', d:'24 edges', rank:0, long:'Cross-channel influences: amygdala→cortisol +0.9 (HPA drive), vmPFC→amygdala −0.8 (regulation), and 22 more. Individuation rides the gains, not the wiring.'},
+      {id:'noise', t:'noise', d:'σ√h·ξ', rank:0, long:'A Wiener increment per channel — the stochastic in stochastic differential equations. Makes runs vary and the agent feel alive.'},
+      {id:'euler', t:'Euler–Maruyama', d:'dx = …, h ≤ 0.02h', rank:1, kind:'family', long:'dx = k(base−x)h + Σ(weight·signal)h + σ√h·ξ, summed over sub-steps ≤0.02h so the integrator stays stable for fast rate constants.'},
+      {id:'load', t:'allostatic load', d:'∝ amygdala·cortisol', rank:2, long:'After the tick, chronic load accrues from sustained amygdala×cortisol and barely decays — the exposome\'s slow, accumulating memory of stress.'},
+    ],
+    edges:[{s:'revert',t:'euler'},{s:'circ',t:'euler'},{s:'coup',t:'euler'},{s:'noise',t:'euler'},{s:'euler',t:'load'}],
+  },
+  soma: {
+    nodes:[
+      {id:'amyg', t:'amygdala', d:'threat 0..1', rank:1, long:'Threat detector. Driven up by appraised/low-road threat, FEAR, cortisol and allostatic load; pushed down by vmPFC, dlPFC, serotonin, GABA, oxytocin.'},
+      {id:'cortisol', t:'cortisol', d:'HPA ~1', rank:2, long:'The stress hormone. Driven by the amygdala (+0.9), with a circadian peak at waking; its shut-off speed is set by hpaFeedbackGain.'},
+      {id:'vmpfc', t:'vmPFC', d:'regulate', rank:0, long:'Ventromedial PFC — the top-down brake. Reappraisal/acceptance raise it; it inhibits the amygdala (−0.8).'},
+      {id:'dlpfc', t:'dlPFC', d:'control', rank:0, long:'Dorsolateral PFC — effortful control. Raised by coping appraisal (×controlGain); eroded by fatigue (−0.5).'},
+      {id:'serotonin', t:'serotonin', d:'tone ~1', rank:0, long:'Mood tone; buffers the amygdala (−0.5). Lowered by grief and chronic allostatic load.'},
+      {id:'da', t:'da_meso', d:'reward ~1', rank:0, long:'Mesolimbic dopamine — wanting/reward. Sets accumbens (+0.7) and SEEKING; dragged down by fatigue, melatonin and allostatic load.'},
+      {id:'nacc', t:'nacc', d:'reward 0..1', rank:1, long:'Nucleus accumbens — the reward-receipt signal, driven by dopamine and reward appraisal.'},
+      {id:'oxt', t:'oxytocin', d:'bond ~1', rank:0, long:'Affiliation hormone — social buffering of the amygdala (−0.4) and driver of CARE; scaled by oxytocinGain.'},
+      {id:'load', t:'allostaticLoad', d:'0..50 slow', rank:0, long:'Chronic wear. Sensitises the amygdala (+0.15) and erodes serotonin & dopamine — the slow exposome variable that biases everything.'},
+      {id:'fatigue', t:'fatigue', d:'0..1 deplete', rank:0, long:'Depletion across the shift. Erodes dlPFC and dopamine — why control and reward both fail late in a double shift.'},
+    ],
+    edges:[
+      {s:'amyg',t:'cortisol',l:'+0.9',always:1},{s:'vmpfc',t:'amyg',l:'−0.8',type:'neg',always:1},
+      {s:'dlpfc',t:'amyg',l:'−0.4',type:'neg',always:1},{s:'serotonin',t:'amyg',l:'−0.5',type:'neg',always:1},
+      {s:'cortisol',t:'amyg',l:'+0.25',always:1},{s:'oxt',t:'amyg',l:'−0.4',type:'neg',always:1},
+      {s:'da',t:'nacc',l:'+0.7',always:1},{s:'load',t:'amyg',l:'+0.15',always:1},
+      {s:'load',t:'da',l:'−0.12',type:'neg',always:1},{s:'fatigue',t:'dlpfc',l:'−0.5',type:'neg',always:1},
+    ],
+  },
+  affect: {
+    nodes:[
+      {id:'soma', t:'soma channels', d:'whole substrate', rank:0, kind:'family', long:'All neuromodulators, limbic activations and drives, each contributing a weighted vote.'},
+      {id:'val', t:'valence', d:'−1..1', rank:1, long:'tanh( +dopamine +serotonin +oxytocin +opioid +reward +PLAY +CARE − amygdala − cortisol − FEAR − RAGE − grief − fatigue ). How good/bad it feels.'},
+      {id:'aro', t:'arousal', d:'0..1', rank:1, long:'σ( +norepinephrine +cortisol +amygdala +epinephrine +FEAR +RAGE +SEEKING − melatonin − GABA − fatigue ). How activated.'},
+      {id:'dom', t:'dominance', d:'−1..1', rank:1, long:'tanh( +dopamine +controlGain·dlPFC +RAGE − FEAR − grief − cortisol − amygdala ). In-control vs overwhelmed.'},
+    ],
+    edges:[{s:'soma',t:'val'},{s:'soma',t:'aro'},{s:'soma',t:'dom'}],
+  },
+  emotion: {
+    nodes:[
+      {id:'haNeg', t:'high arousal · neg', d:'afraid/anxious/angry', rank:0, kind:'family', long:'a>0.6, v<−0.15 → afraid (dominance<0 & FEAR) or anxious; angry (RAGE high) or frustrated (dominance>0).'},
+      {id:'laNeg', t:'low arousal · neg', d:'despondent/sad/low', rank:0, kind:'family', long:'a<0.42, v<−0.2 → despondent (low dopamine + grief), sad (v<−0.45), else low.'},
+      {id:'posHi', t:'pos · high arousal', d:'delighted/excited', rank:0, kind:'family', long:'v>0.25, a>0.55 → delighted (PLAY high) or excited.'},
+      {id:'pos', t:'positive', d:'content / at ease', rank:0, kind:'family', long:'v>0.2 → content; v>0.05 → at ease.'},
+      {id:'resid', t:'residual', d:'keyed up / neutral', rank:0, kind:'family', long:'High arousal with flat valence → keyed up; otherwise neutral.'},
+      {id:'intensity', t:'intensity', d:'magnitude', rank:1, long:'intensity = 0.5|v| + 0.6|a−0.45| + 0.3|d| + 0.3·amygdala — how strongly the emotion is felt, separate from which one.'},
+    ],
+    edges:[],
+  },
+  integrals: {
+    nodes:[
+      {id:'minutes', t:'minutes in state', d:'anxious/depressed/…', rank:0, long:'Each tick adds dt·60 to the states whose V/A/D + drive region currently holds: anxious, depressed, content, angry, joyful. The "how long did she feel X" answer.'},
+      {id:'stress', t:'cumulativeStress', d:'∫(cortisol−1)', rank:0, long:'∫ max(0, cortisol−1) dt — total stress-hormone exposure over the shift, the dose not the level.'},
+      {id:'reward', t:'cumulativeReward', d:'∫(da_meso−1)', rank:0, long:'∫ max(0, dopamine−1) dt — total reward exposure; stays low for a low-D2, anhedonic profile.'},
+      {id:'load', t:'allostaticLoad', d:'mirrored', rank:0, long:'Read straight from the soma — the chronic-wear variable, reported as a study outcome.'},
+    ],
+    edges:[],
+  },
+  memory: {
+    nodes:[
+      {id:'add', t:'add', d:'salience = f(arousal·cortisol)', rank:0, long:'Stores the event with a salience set by arousal × cortisol — emotionally hot moments are encoded strongly, flat ones barely at all.'},
+      {id:'decay', t:'decayAll', d:'forgetting curve', rank:1, long:'Every tick erodes salience along a forgetting curve, so old neutral events fade while seared ones persist.'},
+      {id:'retrieve', t:'retrieve', d:'recency × salience × overlap', rank:1, long:'Scores memories by recency × salience × keyword overlap with the current event; the top-k are surfaced into the next prompt.'},
+    ],
+    edges:[{s:'add',t:'decay'},{s:'add',t:'retrieve'}],
+  },
+  prompt: {
+    nodes:[
+      {id:'intero', t:'renderInteroception', d:'felt body language', rank:0, long:'Translates valence/arousal/dominance + key channels into first-person bodily language ("my chest is tight, my hands are restless") — the body made narratable.'},
+      {id:'readout', t:'emotion readout', d:'label + intensity', rank:0, long:'The current discrete emotion and its intensity, included so the model knows what it is already feeling.'},
+      {id:'recall', t:'recalled memories', d:'top-k', rank:0, long:'The most relevant past episodes retrieved from the stream — continuity of self across beats.'},
+      {id:'assemble', t:'→ LLM driver', d:'feedback', rank:1, kind:'family', long:'All three are assembled into the context handed back to the LLM, closing the loop. The body\'s entire history reaches cognition only through this felt summary.'},
+    ],
+    edges:[{s:'intero',t:'assemble'},{s:'readout',t:'assemble'},{s:'recall',t:'assemble'}],
+  },
+};
+
+// ---- RENDER MACHINERY -------------------------------------------------------
+const DW=152, DH=56;
+const svg = d3.select('#stage').attr('viewBox',`0 0 ${W} ${H}`).attr('preserveAspectRatio','xMidYMid meet');
+const defs = svg.append('defs');
+function marker(id,color){
+  defs.append('marker').attr('id',id).attr('viewBox','0 0 10 10').attr('refX',9).attr('refY',5)
+    .attr('markerWidth',7).attr('markerHeight',7).attr('orient','auto-start-reverse')
+    .append('path').attr('d','M0,0 L10,5 L0,10 Z').attr('fill',color);
+}
+marker('arrow','#1a1a1a'); marker('arrowMod','#7a1f12'); marker('arrowLoop','#5a5142'); marker('arrowNeg','#7a1f12');
+
+const gMain = svg.append('g');
+const gDetail = svg.append('g').style('display','none');
+
+const panel = {tag:d3.select('#ptag'), title:d3.select('#ptitle'), body:d3.select('#pbody'), hint:d3.select('#phint')};
+const DEFAULT_PANEL = {tag:panel.tag.text(), title:panel.title.text(), body:panel.body.html(), hint:panel.hint.html()};
+function showPanel(tag,title,body,hint){
+  panel.tag.text(tag); panel.title.text(title); panel.body.html(body);
+  panel.hint.html(hint || '');
+}
+function resetPanel(){ showPanel(DEFAULT_PANEL.tag,DEFAULT_PANEL.title,DEFAULT_PANEL.body,DEFAULT_PANEL.hint); }
+
+function border(n, tx, ty){
+  const dx=tx-n.cx, dy=ty-n.cy, hw=n.w/2+4, hh=n.h/2+4;
+  if(dx===0&&dy===0) return [n.cx,n.cy];
+  const s=Math.min(hw/Math.abs(dx||1e-6), hh/Math.abs(dy||1e-6));
+  return [n.cx+dx*s, n.cy+dy*s];
+}
+function edgePath(a,b,curve){
+  const [x1,y1]=border(a,b.cx,b.cy), [x2,y2]=border(b,a.cx,a.cy);
+  const mx=(x1+x2)/2,my=(y1+y2)/2, dx=x2-x1,dy=y2-y1,len=Math.hypot(dx,dy)||1;
+  const cx=mx-dy/len*curve, cy=my+dx/len*curve;
+  return {d:`M${x1},${y1} Q${cx},${cy} ${x2},${y2}`, lx:cx, ly:cy};
+}
+
+function drawGraph(g, nodes, edges, {clickable}={}){
+  g.selectAll('*').remove();
+  const byId={}; nodes.forEach(n=>{n.w=n.w||DW;n.h=n.h||DH;byId[n.id]=n;});
+  const gE=g.append('g'), gL=g.append('g'), gN=g.append('g');
+
+  edges.forEach(e=>{ e._a=byId[e.s]; e._b=byId[e.t]; e._p=edgePath(e._a,e._b, e.type==='loop'?60:26); });
+
+  const eSel=gE.selectAll('path').data(edges).enter().append('path')
+    .attr('class',e=>'edge '+(e.type||''))
+    .attr('d',e=>e._p.d)
+    .attr('marker-end',e=> e.type==='mod'?'url(#arrowMod)': e.type==='loop'?'url(#arrowLoop)': e.type==='neg'?'url(#arrowNeg)':'url(#arrow)');
+
+  const lSel=gL.selectAll('text').data(edges.filter(e=>e.l)).enter().append('text')
+    .attr('class',e=>'elabel'+(e.always?' always':''))
+    .attr('x',e=>e._p.lx).attr('y',e=>e._p.ly-3).text(e=>e.l);
+
+  const nSel=gN.selectAll('g').data(nodes).enter().append('g')
+    .attr('class',n=>'node kind-'+(n.kind||'std')+(clickable&&DETAIL[n.id]?' clickable':''))
+    .attr('transform',n=>`translate(${n.cx},${n.cy})`);
+  nSel.append('rect').attr('x',n=>-n.w/2).attr('y',n=>-n.h/2).attr('width',n=>n.w).attr('height',n=>n.h).attr('rx',3);
+  nSel.append('text').attr('class','title').attr('y',n=>n.d?-7:0).text(n=>n.t);
+  nSel.append('text').attr('class','desc').attr('y',11).text(n=>n.d||'');
+  // expand mark for clickable top nodes
+  nSel.filter(n=>clickable&&DETAIL[n.id]).append('text').attr('class','expandmark')
+    .attr('x',n=>n.w/2-9).attr('y',n=>-n.h/2+12).text('⊕');
+
+  function neighbors(id){const ns=new Set([id]),es=new Set();edges.forEach((e,i)=>{if(e.s===id||e.t===id){es.add(i);ns.add(e.s);ns.add(e.t);}});return{ns,es};}
+  nSel.on('mouseenter',(ev,n)=>{
+    const tag = clickable?'system node':'mechanism';
+    showPanel(tag, n.t, n.long||n.d||'', clickable&&DETAIL[n.id]?'<span style="color:#7a1f12">⊕</span> click to open its inner mechanism':'');
+    const {ns,es}=neighbors(n.id);
+    g.classed('dim',true);
+    nSel.select('rect').attr('stroke',d=>ns.has(d.id)?null:'#c2b58c');
+    nSel.select('.title').style('fill',d=>ns.has(d.id)?null:'#c2b58c');
+    nSel.select('.desc').style('opacity',d=>ns.has(d.id)?1:.2);
+    eSel.style('opacity',(d,i)=>es.has(i)?.95:null).style('stroke-width',(d,i)=>es.has(i)?2:null);
+    lSel.style('opacity',d=>(d.s===n.id||d.t===n.id)?1:null);
+  }).on('mouseleave',()=>{
+    resetPanel(); g.classed('dim',false);
+    nSel.select('rect').attr('stroke',null); nSel.select('.title').style('fill',null); nSel.select('.desc').style('opacity',null);
+    eSel.style('opacity',null).style('stroke-width',null); lSel.style('opacity',null);
+  });
+  if(clickable){ nSel.filter(n=>DETAIL[n.id]).on('click',(ev,n)=>openDetail(n)); }
+  return nSel;
+}
+
+// auto-layout a detail graph by rank, then draw
+function layoutDetail(d){
+  const nodes=d.nodes.map(n=>({...n}));
+  const ranks=[...new Set(nodes.map(n=>n.rank))].sort((a,b)=>a-b);
+  const xL=300, xR=W-300, top=152, bot=700;
+  const colX = ranks.length===1 ? [(xL+xR)/2] : ranks.map((r,i)=>xL+(xR-xL)*i/(ranks.length-1));
+  ranks.forEach((r,ri)=>{
+    const col=nodes.filter(n=>n.rank===r);
+    const h=Math.min(72, (bot-top)/Math.max(col.length,1));
+    const total=col.length*h, startY=top+((bot-top)-total)/2+h/2;
+    col.forEach((n,i)=>{ n.cx=colX[ri]; n.cy=startY+i*h; n.w=176; n.h=Math.min(56, h-10); });
+  });
+  return {nodes, edges:d.edges.map(e=>({...e}))};
+}
+
+const backBtn=d3.select('#back'), detailTitle=d3.select('#detailTitle');
+function openDetail(node){
+  const d=DETAIL[node.id]; if(!d) return;
+  const laid=layoutDetail(d);
+  drawGraph(gDetail, laid.nodes, laid.edges, {clickable:false});
+  gMain.transition().duration(160).style('opacity',0).on('end',()=>gMain.style('display','none'));
+  gDetail.style('display',null).style('opacity',0).transition().duration(220).style('opacity',1);
+  detailTitle.text('inside ▸ '+node.t).style('display','block');
+  backBtn.style('display','block');
+  showPanel('inside '+node.t, node.t, node.long, 'Hover the inner nodes. Click "back" or press Esc to return.');
+}
+function closeDetail(){
+  gDetail.transition().duration(160).style('opacity',0).on('end',()=>gDetail.style('display','none'));
+  gMain.style('display',null).transition().duration(220).style('opacity',1);
+  detailTitle.style('display','none'); backBtn.style('display','none'); resetPanel();
+}
+backBtn.on('click',closeDetail);
+d3.select('body').on('keydown',ev=>{ if(ev.key==='Escape') closeDetail(); });
+
+drawGraph(gMain, NODES, EDGES, {clickable:true});
+</script>
+</body>
+</html>
