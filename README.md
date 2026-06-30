@@ -90,6 +90,42 @@ situational intelligence to drive a human-psychology / exposome simulation. Late
 top abstraction layer down to organ/tissue and receptor/PPI layers via the shared
 hormone/neurotransmitter interface.
 
+## The town — a life by need (level-of-detail cognition)
+
+ExposomeSim scales from one room to a compressed modern-western life by spending its
+one expensive resource — a full ~33-channel soma — only where **attention** is:
+
+- **Tier 0 — Mara** runs the full psychological simulator every tick.
+- **Tier 2 — a partner** is promoted to a full soma *only while she's interacting with
+  them*, then distilled to a one-line **ledger** summary and demoted (`src/sim/town.ts`).
+- **Tier 1 — proximate NPCs** are cheap symbolic minds (path + goal token, no soma).
+- **Tier 3 — the city** is a pure population-density field — thousands implied, zero
+  instantiated (`src/sim/city.ts`).
+
+Her day is **not scripted**. A Maslow **needs** layer is read off the soma
+(`src/harness/needs.ts`: hunger←ghrelin, energy←fatigue, belonging←a slow social
+reservoir + PANIC/GRIEF, safety←cortisol/amygdala, …) and an **arbiter**
+(`src/sim/arbiter.ts`) scores those deficits against place **affordances**
+(`src/sim/places.ts` — home · work · market · café · park) bound by money / food /
+energy / time (`src/sim/economy.ts`). The work→eat→home→shop→café loop is the *limit
+cycle* of those drives, not a calendar. **Relationships emerge** unscripted from
+reciprocated, oxytocin-rewarding encounters (`src/sim/relationship.ts`) — over a week
+Mara forms a warm friendship with one café regular while another stays strained, with
+no `befriend` verb anywhere.
+
+Verify the emergence headless (no browser, no LLM):
+
+```bash
+npx tsx scripts/town-smoke.ts   # prints the emergent day + the relationship ledger
+```
+
+Press **C** (or the CITY button) to zoom out to the town map — places, streets, the
+breathing density field, and Mara's marker tracing her path, with the relationship
+constellation condensing at the café. The dashboard's **a life by need** panel shows
+where she is, *why* (the arbiter's reason), her need deficits, money/food, and the
+ledger. It runs without Ollama (soma-derived fallback); start Ollama to put the LLM
+back in Mara's loop.
+
 ## The neuroanatomy panel
 
 The dashboard's **Neuroanatomy · soma vector** panel (toggle with the **BRAIN** button)

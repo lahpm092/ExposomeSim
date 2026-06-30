@@ -231,6 +231,7 @@ export interface Customer {
   pos: Vec3;
   state: 'approaching' | 'ordering' | 'waiting' | 'leaving' | 'gone';
   spawnedAt: number;
+  profileSeed?: number;      // when set, this customer can be promoted to a full-sim NPC
 }
 
 /** Snapshot the renderer + dashboard read each frame (no logic, pure data). */
@@ -241,6 +242,8 @@ export interface CashierPublic {
   integrals: EmotionIntegrals;
   lastResponse?: LLMResponse;
   recentMemories: MemoryItem[];
+  needs?: NeedsReadout;            // Maslow deficits read off the soma (town layer)
+  needsIntegrals?: NeedsIntegrals;
 }
 
 export interface WorldSnapshot {
@@ -264,4 +267,135 @@ export interface LLMClient {
     messages: ChatMessage[],
     opts?: { format?: 'json'; temperature?: number; signal?: AbortSignal },
   ): Promise<string>;
+}
+
+// ===========================================================================
+// 11. THE TOWN — level-of-detail scaling to a compressed modern-western life.
+//   Full psyche only for the protagonist + whoever she is interacting with;
+//   cheap symbolic minds for proximate NPCs; pure statistics for the city.
+//   The daily/weekly loop is NOT scripted — it emerges from Maslow needs read
+//   off the soma, arbitrated against place affordances + money/food/energy/time.
+// ===========================================================================
+export interface Vec2 { x: number; y: number; }
+
+// ---- Maslow needs: a derived readout of the soma (like core affect) --------
+export type NeedTier = 'physiological' | 'safety' | 'belonging' | 'esteem' | 'actualization';
+
+/** Each field is a DEFICIT in [0,1] — 1 = maximally unmet. */
+export interface NeedsReadout {
+  hunger: number; energy: number; safety: number; belonging: number; esteem: number; novelty: number;
+  deficit: Record<NeedTier, number>;
+  dominantTier: NeedTier;
+}
+export interface NeedsIntegrals {
+  minutesHungry: number; minutesLonely: number; minutesDepleted: number; minutesUnsafe: number;
+}
+
+// ---- places & affordances (the only authored content) ----------------------
+export type PlaceId = 'home' | 'work' | 'market' | 'thirdplace' | 'park';
+export type IntentionKind =
+  | 'eat' | 'rest' | 'work' | 'shop' | 'socialize' | 'go_home' | 'linger';
+
+export interface Affordance {
+  kind: IntentionKind;
+  tier: NeedTier;
+  satisfies: number;        // how strongly it relieves its tier, [0,1]
+  costMoney: number;
+  costEnergy: number;       // fatigue added (or, for rest, negative)
+  durHours: number;
+  needsFoodStock?: boolean; // eat requires foodStock>0
+  social?: boolean;         // a site of NPC interaction
+}
+export interface Place {
+  id: PlaceId;
+  name: string;
+  pos2D: Vec2;              // town coords in [0,1]
+  openHours: [number, number]; // [open, close); wraps if open>close; [0,24]=always
+  capacity: number;        // max simultaneous proximate NPCs
+  localeKind: string;      // which 3D locale the Stage builds
+  affordances: Affordance[];
+}
+
+// ---- agency: the emergent goal, not a schedule -----------------------------
+export interface Intention {
+  kind: IntentionKind;
+  place: PlaceId;
+  targetNpc?: string;
+  utility: number;
+  reason: string;          // human-readable "why" for the dashboard
+}
+export interface CurrentGoal {
+  intention: Intention;
+  phase: 'travel' | 'execute';
+  startedAt: number;
+  plannedEnd: number;
+}
+
+// ---- the resource economy (binding constraints that close the loop) --------
+export interface Resources {
+  money: number;
+  foodStock: number;       // meals on hand at home
+  sleepDebt: number;       // hours
+  rentDue: number;         // amount owed at rentDueAt
+  rentDueAt: number;       // clock (absolute sim-hours) when rent is charged
+  wageEarned: number;      // cumulative, for the dashboard
+}
+
+// ---- Tier-1 proximate NPC: a cheap symbolic mind, NO soma ------------------
+export interface NpcLite {
+  id: string;
+  profileSeed: number;
+  name: string;
+  pos: Vec3;
+  dir: number;
+  path: Vec3[];
+  goalToken: 'queue' | 'browse' | 'linger' | 'approach_mara' | 'leave';
+  hunger: number; energy: number; mood: number; // cheap scalars [0,1]/[-1,1]
+  wantsMara: boolean;      // triggers promotion to a full-sim partner
+  bonded?: boolean;        // has a ledger relationship with Mara
+}
+
+// ---- the emergent relationship ledger --------------------------------------
+export type RelStage = 'stranger' | 'acquaintance' | 'friend' | 'close' | 'romantic';
+export interface Relationship {
+  npcId: string;
+  profileSeed: number;
+  name: string;
+  familiarity: number;     // [0,1]
+  affection: number;       // [-1,1]
+  trust: number;           // [0,1]
+  attraction: number;      // [0,1]
+  tension: number;         // [0,1]
+  cumValence: number;      // running sum of Mara's interaction valence
+  encounters: number;
+  lastSeen: number;
+  stage: RelStage;
+  summary: string;
+  somaSnapshot?: Partial<SomaState>;
+}
+export type Ledger = Map<string, Relationship>;
+
+// ---- Tier-3 city: pure statistics, zero stored agents ----------------------
+export interface DensityField {
+  cols: number; rows: number;
+  cell: Float32Array;      // occupancy per cell, [0,1]
+  t: number;               // clock when last relaxed
+  placeCell: Partial<Record<PlaceId, number>>; // cell index of each place
+}
+
+// ---- the town snapshot the renderers read each frame -----------------------
+export interface TownSnapshot extends WorldSnapshot {
+  place: PlaceId;
+  macroPos: Vec2;          // Mara's town position (interpolated while travelling)
+  travelling: boolean;
+  needs: NeedsReadout;
+  needsIntegrals: NeedsIntegrals;
+  resources: Resources;
+  intention: Intention;
+  day: number;
+  weekend: boolean;
+  density: DensityField;
+  locale: { figures: NpcLite[] };
+  relationships: Relationship[];
+  partner?: CashierPublic; // the currently-promoted full-sim interaction partner
 }

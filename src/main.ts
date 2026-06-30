@@ -4,12 +4,14 @@
 //   visualization      → Stage.update(snapshot)  (three.js)
 //   instrument readout → Dashboard.update(snapshot)  (canvas panels)
 // =============================================================================
-import { World } from './sim/world';
+import { Town } from './sim/town';
 import { OllamaClient, probeOllama } from './llm/client';
 import { Stage } from './render/stage';
 import { BrainPanel } from './render/brain';
+import { CityView } from './render/cityview';
+import { TownPanel } from './ui/townpanel';
 import { Dashboard } from './ui/dashboard';
-import type { WorldSnapshot } from './types';
+import type { TownSnapshot } from './types';
 
 const canvas = document.getElementById('scene') as HTMLCanvasElement;
 const dashEl = document.getElementById('dashboard') as HTMLElement;
@@ -31,16 +33,21 @@ async function boot() {
       'Start it with <code>ollama serve</code> and reload to put the LLM in the loop.';
   }
 
-  const world = new World({ llm, startHour: 11, speed: 0.05 });
+  const titlebar = document.getElementById('titlebar')!;
+  const stageEl = document.getElementById('stage')!;
+  const town = new Town({ llm, startHour: 7.5, speed: 0.3 });
   const stage = new Stage(canvas);
   const dashboard = new Dashboard(dashEl);
-  const brain = new BrainPanel(dashEl, document.getElementById('titlebar')!);
+  const townPanel = new TownPanel(dashEl);
+  const brain = new BrainPanel(dashEl, titlebar);
+  const city = new CityView(stageEl, titlebar);
 
-  addEventListener('resize', () => { stage.resize(); brain.resize(); });
+  addEventListener('resize', () => { stage.resize(); brain.resize(); city.resize(); });
   addEventListener('keydown', (e) => {
-    if (e.code === 'Space') { e.preventDefault(); world.togglePause(); }
-    else if (e.key === '+' || e.key === '=') world.setSpeed(Math.min(0.4, world.speed * 1.5));
-    else if (e.key === '-') world.setSpeed(Math.max(0.01, world.speed / 1.5));
+    if (e.code === 'Space') { e.preventDefault(); town.togglePause(); }
+    else if (e.key === '+' || e.key === '=') town.setSpeed(Math.min(0.6, town.speed * 1.5));
+    else if (e.key === '-') town.setSpeed(Math.max(0.02, town.speed / 1.5));
+    else if (e.key === 'c' || e.key === 'C') city.toggle();
     else if (e.key === 'ArrowUp') { e.preventDefault(); brain.selectPrev(); }
     else if (e.key === 'ArrowDown') { e.preventDefault(); brain.selectNext(); }
   });
@@ -50,11 +57,13 @@ async function boot() {
     const dtReal = Math.min(0.05, (now - last) / 1000); // clamp tab-switch jumps
     last = now;
 
-    world.update(dtReal);
-    const snap = world.snapshot();
+    town.update(dtReal);
+    const snap = town.snapshot();
     stage.update(snap, dtReal);
     dashboard.update(snap);
+    townPanel.update(snap);
     brain.update(snap, dtReal);
+    city.update(snap, dtReal);
 
     clockEl.textContent = fmtClock(snap.time);
     renderCaption(snap);
@@ -63,7 +72,7 @@ async function boot() {
   requestAnimationFrame(frame);
 }
 
-function renderCaption(snap: WorldSnapshot) {
+function renderCaption(snap: TownSnapshot) {
   const r = snap.cashier.lastResponse;
   const name = snap.cashier.profile.name.toUpperCase();
   const ev = snap.currentEvent?.description ?? '';

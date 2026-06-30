@@ -83,7 +83,7 @@ export function integrate(soma: SomaState, params: SomaParams, dtHours: number, 
   // allostatic load is the exposome's memory: it slowly accrues from sustained
   // amygdala+cortisol load (this dominates its tiny decay).
   const loadDrive = Math.max(0, soma.amygdala - 0.3) * Math.max(0, soma.cortisol - 1);
-  soma.allostaticLoad = clampCh('allostaticLoad', soma.allostaticLoad + loadDrive * dtHours * 0.5);
+  soma.allostaticLoad = clampCh('allostaticLoad', soma.allostaticLoad + loadDrive * dtHours * 0.25);
 
   computeCoreAffect(soma, params);
 }

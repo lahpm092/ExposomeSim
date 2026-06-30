@@ -50,7 +50,7 @@ const BASE_NOISE: Partial<Record<SomaChannel, number>> = {
   amygdala: 0.05, nacc: 0.04, insula: 0.04,
   da_meso: 0.06, da_cort: 0.05, serotonin: 0.04, norepinephrine: 0.06, gaba: 0.04,
   oxytocin: 0.04, opioid: 0.03, endocannabinoid: 0.03,
-  cortisol: 0.07, melatonin: 0.05, epinephrine: 0.05,
+  cortisol: 0.07, melatonin: 0.05, epinephrine: 0.05, ghrelin: 0.03, leptin: 0.02,
   SEEKING: 0.04, FEAR: 0.04, RAGE: 0.04, CARE: 0.03, PANIC_GRIEF: 0.03, PLAY: 0.04,
 };
 
@@ -62,6 +62,11 @@ const CIRCADIAN: Partial<Record<SomaChannel, CircadianTerm>> = {
   da_meso:        { mean: 1.00, amplitude: 0.12, phaseHours: 14 },
   serotonin:      { mean: 1.00, amplitude: 0.10, phaseHours: 13 }, // higher in daylight
   norepinephrine: { mean: 1.00, amplitude: 0.18, phaseHours: 11 },
+  // hunger drive: ghrelin reverts toward a mildly-elevated set-point (climbs between
+  // meals) with an evening peak; an `eat` event resets it low (see town affordances).
+  // Kept near baseline so a meal SATES for hours — otherwise she is perpetually
+  // peckish and the physiological tier never yields the floor to belonging/esteem.
+  ghrelin:        { mean: 1.05, amplitude: 0.20, phaseHours: 18 },
 };
 
 // universal cross-channel couplings (individualization rides on the gains below
@@ -92,6 +97,13 @@ const BASE_COUPLINGS: CouplingEdge[] = [
   { from: 'opioid', to: 'PANIC_GRIEF', weight: -0.4 },
   { from: 'FEAR', to: 'amygdala', weight: 0.4 },
   { from: 'RAGE', to: 'norepinephrine', weight: 0.3 },
+  // hunger drive (Maslow physiological → body): ghrelin recruits SEEKING + the
+  // hypothalamic homeostat, and a little hangry irritability; leptin (satiety)
+  // suppresses the ghrelin signal. Modest weights — the engine is stable to k≈8/h.
+  { from: 'ghrelin', to: 'SEEKING', weight: 0.35 },
+  { from: 'ghrelin', to: 'hypothalamus', weight: 0.4 },
+  { from: 'ghrelin', to: 'RAGE', weight: 0.15 },
+  { from: 'leptin', to: 'ghrelin', weight: -0.3 },
 ];
 
 const ATTACH_THREAT: Record<Attachment, number> = { secure: -0.10, avoidant: 0.10, anxious: 0.28, disorganized: 0.42 };
