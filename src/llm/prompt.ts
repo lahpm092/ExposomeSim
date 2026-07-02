@@ -17,6 +17,32 @@ const REGULATIONS: RegulationStrategy[] = [
 ];
 const ACTIONS = ['greet', 'take_order', 'serve', 'thank', 'apologize', 'wait', 'gesture', 'deep_breath', 'call_manager'];
 
+// JSON Schema for structured output. With a *thinking* model this constrains the
+// ANSWER to the exact appraisal contract while the model still reasons freely in
+// its separate thinking channel — so the reasoning is never wasted on drifted keys.
+const NUM = { type: 'number' };
+export const LLM_RESPONSE_SCHEMA = {
+  type: 'object',
+  properties: {
+    appraisal: {
+      type: 'object',
+      properties: {
+        novelty: NUM, pleasantness: NUM, goalRelevance: NUM, goalCongruence: NUM,
+        agency: { type: 'string', enum: ['self', 'other', 'circumstance'] },
+        blameworthiness: NUM, copingPotential: NUM, certainty: NUM, normCompatibility: NUM, urgency: NUM,
+      },
+      required: ['novelty', 'pleasantness', 'goalRelevance', 'goalCongruence', 'agency',
+        'blameworthiness', 'copingPotential', 'certainty', 'normCompatibility', 'urgency'],
+    },
+    emotion: { type: 'string' },
+    regulation: { type: 'string', enum: REGULATIONS },
+    speech: { type: 'string' },
+    action: { type: 'string', enum: ACTIONS },
+    innerMonologue: { type: 'string' },
+  },
+  required: ['appraisal', 'emotion', 'regulation', 'speech', 'action', 'innerMonologue'],
+} as const;
+
 const clockOf = (t: number) => {
   const h = Math.floor(((t % 24) + 24) % 24);
   const m = Math.floor((t - Math.floor(t)) * 60);
@@ -59,6 +85,8 @@ Temperament (Big Five z-scores): Openness ${b.O.toFixed(1)}, Conscientiousness $
 Goals: ${profile.goals.join('; ')}.
 
 You react to each moment based on how your BODY and MIND actually feel right now — you will be told. Let that physical state drive you: if you feel flat and exhausted, be flat and exhausted; if warm, be warm; if on edge, be short. Do not be a cheerful assistant — be ${profile.name}.
+
+Think it through privately before you answer: (1) what does the other person most likely want and feel right now, and why are they acting this way? (2) what would each way you could respond cause — in them, and in how you will feel a moment later? (3) which response actually fits who ${profile.name} is and how her body feels this instant? Then commit.
 
 Reply with ONLY a JSON object, no prose, exactly this shape:
 {

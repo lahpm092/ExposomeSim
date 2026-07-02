@@ -30,7 +30,7 @@ import { chooseIntention } from './arbiter';
 import { newRelationship, updateBond, distillSummary, decayBonds } from './relationship';
 import { createDensity, stepDensity, expectedAt } from './city';
 import { makeNpcLite, stepNpcLite, npcName, type LiteCtx } from './npc';
-import { buildMessages, parseResponse, fallbackResponse } from '../llm/prompt';
+import { buildMessages, parseResponse, fallbackResponse, LLM_RESPONSE_SCHEMA } from '../llm/prompt';
 import { makeCustomer, buildAgenda, IDLE_EVENT } from './events';
 import { mulberry32, clamp, lerp, type RNG } from '../util/num';
 
@@ -54,7 +54,8 @@ const ev = (kind: string, description: string, s: number, v: number, source?: st
   ({ id: `te${(_eid++).toString(36)}`, kind, description, salienceHint: s, valenceHint: v, source });
 
 export interface TownOpts {
-  profile?: Profile; llm?: LLMClient | null; seed?: number; startHour?: number; speed?: number;
+  profile?: Profile; llm?: LLMClient | null; consolidator?: LLMClient | null;
+  seed?: number; startHour?: number; speed?: number;
 }
 
 export class Town {
@@ -62,6 +63,8 @@ export class Town {
   /** full-resolution protagonists (Mara is [0]; a second can be added at runtime). */
   readonly protagonists: Character[] = [];
   llm: LLMClient | null;
+  /** off-hot-path reasoner for memory consolidation/reflection (falls back to llm). */
+  consolidator: LLMClient | null;
   speed: number;
   paused = false;
 
@@ -88,7 +91,9 @@ export class Town {
   private lastSocialAt: number;
   private socialFuel = 0.55; // slow belonging reservoir: drains alone, refills on contact
   private rng: RNG;
-  private beatAcc = 0; private readonly beatInterval = 0.05;
+  // beatInterval is in sim-hours. With a *thinking* driver (~10s/beat) the pendingLLM
+  // guard already prevents pile-up; this sets the deliberate spacing between thoughts.
+  private beatAcc = 0; private readonly beatInterval = 0.06;
   private arbAcc = 0; private readonly arbInterval = 0.22;
   private pendingLLM = false;
   private servedCount = 0;
@@ -108,6 +113,7 @@ export class Town {
     });
     this.protagonists.push(this.mara);
     this.llm = opts.llm ?? null;
+    this.consolidator = opts.consolidator ?? null;
     this.speed = opts.speed ?? 0.05;
     this.rng = mulberry32(((opts.seed ?? 7) * 2654435761) >>> 0);
     this.resources = createResources(this.clock);
@@ -363,7 +369,7 @@ export class Town {
     }
     // rest is when the hippocampus replays the day: consolidate episodics into
     // semantic gists + reflect (async, LLM-optional, rate-limited inside rest()).
-    this.mara.rest(dt, this.llm);
+    this.mara.rest(dt, this.consolidator ?? this.llm);
   }
 
   // ---- MARKET: convert money → food stock ---------------------------------
@@ -543,7 +549,7 @@ export class Town {
     const mems = this.mara.recall(e.description, 3);
     const messages = buildMessages(this.mara.profile, soma, readout, mems, e);
     let resp: LLMResponse;
-    try { resp = parseResponse(await this.llm!.complete(messages, { format: 'json', temperature: 0.7 }), soma, readout); }
+    try { resp = parseResponse(await this.llm!.complete(messages, { format: LLM_RESPONSE_SCHEMA, temperature: 0.7 }), soma, readout); }
     catch { resp = fallbackResponse(soma, readout, e); }
     this.mara.applyDriverResponse(e, resp);
   }
@@ -568,7 +574,7 @@ export class Town {
     const mems = this.mara.recall('food buy market cook eat groceries rice eggs vegetables', 4);
     const messages = buildMessages(this.mara.profile, soma, readout, mems, e);
     let resp: LLMResponse;
-    try { resp = parseResponse(await this.llm!.complete(messages, { format: 'json', temperature: 0.8 }), soma, readout); }
+    try { resp = parseResponse(await this.llm!.complete(messages, { format: LLM_RESPONSE_SCHEMA, temperature: 0.8 }), soma, readout); }
     catch { resp = fallbackResponse(soma, readout, e); }
     this.mara.applyDriverResponse(e, resp);
     this.stockFromThought(`${resp.speech} ${resp.innerMonologue ?? ''}`);

@@ -28,7 +28,13 @@ const fmtClock = (t: number) => {
 
 async function boot() {
   const online = await probeOllama();
-  const llm = online ? new OllamaClient({ model: 'qwen3:0.6b' }) : null;
+  // Deliberate driver: 1.7B with CoT thinking ON. Every beat, Mara reasons about
+  // the other mind and plays the consequences forward before committing — the
+  // schema (structured output) keeps her answer on-contract despite the free
+  // reasoning. Slower per beat (~10s), so the sim clock is slowed to match.
+  const llm = online ? new OllamaClient({ model: 'qwen3:1.7b', think: true }) : null;
+  // same reasoner does off-hot-path memory consolidation/reflection during rest.
+  const consolidator = llm;
   if (!online) {
     captionEl.innerHTML =
       '<span class="who">system</span>Ollama not reachable — running on the soma-derived fallback driver. ' +
@@ -37,7 +43,11 @@ async function boot() {
 
   const titlebar = document.getElementById('titlebar')!;
   const stageEl = document.getElementById('stage')!;
-  const town = new Town({ llm, startHour: 7.5, speed: 0.12 });
+  // clock: 0.02 sim-h per real-second — lively enough that the quiet morning-at-home
+  // doesn't read as "stuck" (she bathes in ~30s, reaches the café in ~2 min), while a
+  // ~10s thought still only drifts ~12 sim-minutes so the event stays reasonably fresh.
+  // Use '-' to slow toward the old faithful 0.005 pace; '+' to speed up.
+  const town = new Town({ llm, consolidator, startHour: 7.5, speed: 0.02 });
   const stage = new CityStage(canvas);
   const dashboard = new Dashboard(dashEl);
   const townPanel = new TownPanel(dashEl);
@@ -50,7 +60,7 @@ async function boot() {
   addEventListener('keydown', (e) => {
     if (e.code === 'Space') { e.preventDefault(); town.togglePause(); }
     else if (e.key === '+' || e.key === '=') town.setSpeed(Math.min(0.6, town.speed * 1.5));
-    else if (e.key === '-') town.setSpeed(Math.max(0.02, town.speed / 1.5));
+    else if (e.key === '-') town.setSpeed(Math.max(0.002, town.speed / 1.5));
     else if (e.key === 'c' || e.key === 'C') city.toggle();
     else if (e.key === 'ArrowUp') { e.preventDefault(); brain.selectPrev(); }
     else if (e.key === 'ArrowDown') { e.preventDefault(); brain.selectNext(); }

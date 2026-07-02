@@ -21,24 +21,25 @@
   h1{font-size:13px;font-weight:600;letter-spacing:.34em;text-transform:uppercase;margin:0;}
   h1 .sep{color:var(--oxblood);margin:0 .5em;}
   .sub{margin:6px 0 0;font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-soft);font-style:italic;}
-  #stage{width:100vw;height:100vh;display:block;}
+  #stage{width:100vw;height:100vh;display:block;cursor:grab;}
+  #stage:active{cursor:grabbing;}
 
   .node rect{fill:var(--paper-deep);stroke:var(--ink);stroke-width:1.4;transition:stroke .15s,stroke-width .15s,fill .15s;cursor:pointer;}
   .node.kind-soma rect{fill:#ddcfa9;stroke-width:2;}
   .node.kind-gain rect{fill:none;stroke:var(--oxblood);stroke-dasharray:5 4;}
   .node.kind-family rect{fill:#e7dcc0;stroke-dasharray:1 0;}
-  .node .title{font-size:11px;font-weight:600;letter-spacing:.11em;text-transform:uppercase;fill:var(--ink);text-anchor:middle;dominant-baseline:middle;pointer-events:none;}
+  .node .title{font-size:13px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;fill:var(--ink);text-anchor:middle;dominant-baseline:middle;pointer-events:none;}
   .node.kind-gain .title{fill:var(--oxblood);}
-  .node .desc{font-size:8.5px;letter-spacing:.04em;fill:var(--ink-soft);text-anchor:middle;dominant-baseline:middle;pointer-events:none;}
+  .node .desc{font-size:10px;letter-spacing:.035em;fill:var(--ink-soft);text-anchor:middle;dominant-baseline:middle;pointer-events:none;}
   .node.clickable .title::after{content:'';}
-  .expandmark{font-size:9px;fill:var(--oxblood);text-anchor:middle;pointer-events:none;}
+  .expandmark{font-size:10px;fill:var(--oxblood);text-anchor:middle;pointer-events:none;}
 
   .edge{fill:none;stroke:var(--ink);stroke-width:1.2;opacity:.6;transition:opacity .15s,stroke-width .15s;}
   .edge.mod{stroke:var(--oxblood);stroke-dasharray:5 4;opacity:.55;}
   .edge.loop{stroke:var(--ink-soft);stroke-dasharray:2 4;opacity:.5;}
   .edge.neg{stroke:var(--oxblood);opacity:.5;}
-  .elabel{font-size:7.5px;letter-spacing:.06em;fill:var(--ink-soft);text-anchor:middle;opacity:0;transition:opacity .15s;}
-  .elabel.always{opacity:.6;}
+  .elabel{font-size:9px;letter-spacing:.05em;fill:var(--ink-soft);text-anchor:middle;opacity:0;transition:opacity .15s;}
+  .elabel.always{opacity:.65;}
 
   .dim .edge{opacity:.07 !important;}
 
@@ -51,10 +52,10 @@
     max-height:168px;overflow:hidden;transition:opacity .15s;
   }
   #panel .pleft{border-right:1px solid var(--hair);padding-right:22px;}
-  #panel .ptag{font-size:9px;letter-spacing:.24em;text-transform:uppercase;color:var(--oxblood);margin-bottom:6px;}
-  #panel .ptitle{font-size:15px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;line-height:1.2;}
-  #panel .phint{font-size:9.5px;letter-spacing:.05em;color:var(--ink-soft);margin-top:10px;font-style:italic;}
-  #panel .pbody{font-size:12px;line-height:1.5;color:var(--ink);align-self:center;}
+  #panel .ptag{font-size:9.5px;letter-spacing:.24em;text-transform:uppercase;color:var(--oxblood);margin-bottom:6px;}
+  #panel .ptitle{font-size:16.5px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;line-height:1.2;}
+  #panel .phint{font-size:10px;letter-spacing:.05em;color:var(--ink-soft);margin-top:10px;font-style:italic;}
+  #panel .pbody{font-size:13px;line-height:1.55;color:var(--ink);align-self:center;}
 
   /* back affordance */
   #back{
@@ -69,15 +70,21 @@
   footer{position:fixed;top:74px;right:34px;z-index:6;pointer-events:none;
     font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-soft);text-align:right;}
   footer .accent{color:var(--oxblood);}
+  #resetZoom{
+    position:fixed;top:96px;right:34px;z-index:7;cursor:pointer;
+    font-size:9.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--oxblood);
+    border-bottom:1px solid var(--oxblood);padding-bottom:2px;
+  }
 </style>
 </head>
 <body>
 <header>
   <h1>Exposome<span class="sep">·</span>causal structure</h1>
-  <p class="sub">hover a node to read what it does <span style="color:#7a1f12">·</span> click a node to open its inner mechanism</p>
+  <p class="sub">hover a node to read what it does <span style="color:#7a1f12">·</span> click a node to open its inner mechanism <span style="color:#7a1f12">·</span> scroll to zoom <span style="color:#7a1f12">·</span> drag to pan</p>
 </header>
 <div id="back">← back to whole system</div>
 <div id="detailTitle"></div>
+<div id="resetZoom">⊙ reset view</div>
 <svg id="stage"></svg>
 
 <div id="panel">
@@ -86,7 +93,7 @@
     <div class="ptitle" id="ptitle">A character that lives in numbers</div>
     <div class="phint" id="phint">Hover any box. Boxes marked <span style="color:#7a1f12">⊕</span> open a deeper view on click.</div>
   </div>
-  <div class="pbody" id="pbody">A world event is felt twice — once instantly by the body (low road), once interpreted by the LLM, which appraises it (SEC/OCC) and chooses how to cope. Both routes inject impulses into the <em>soma</em>: a persistent set of limbic, neuromodulator, hormone and drive variables that keep evolving as coupled stochastic equations. Core affect is read off the soma, the discrete emotion is constructed from it, the integrals accumulate the lived dose, and the felt state is fed back as the next prompt.</div>
+  <div class="pbody" id="pbody">A world event is felt twice — once instantly by the body (low road), once interpreted by the LLM, which appraises it (SEC/OCC) and chooses how to cope. Both routes inject impulses into the <em>soma</em>: a persistent set of limbic, neuromodulator, hormone and drive variables that keep evolving as coupled stochastic equations. Core affect is read off the soma, the discrete emotion is constructed from it, the integrals accumulate the lived dose, and the felt state is fed back as the next prompt. Beneath the soma a homeostatic reservoir layer generates felt hunger, thirst and urgency; Maslow <em>needs</em> read off the substrate drive a utility arbiter, so the daily loop <em>emerges</em>; and memory is an affective <em>graph</em> that consolidates episodes into gists and schemas.</div>
 </div>
 
 <footer>
@@ -117,15 +124,21 @@ const NODES = [
   {id:'integrate', cx:1075, cy:300, t:'integrate()', d:'SDEs · circadian · HPA',
    long:'The physics tick. Every frame the substrate advances by Euler–Maruyama integration of coupled mean-reverting (Ornstein–Uhlenbeck) SDEs, with circadian set-points, the cross-channel coupling graph, and stochastic noise — sub-stepped at ≤0.02h for stability.'},
   {id:'soma', cx:1075, cy:540, t:'Soma', d:'limbic · neuromods · hormones', kind:'soma', w:200, h:84,
-   long:'The persistent self — the ~34 numbers that ARE the character between LLM calls: limbic activations, neuromodulator tone, hormones, Panksepp drives, plus slow exposome variables (allostatic load, fatigue). The LLM is stateless; continuity lives here.'},
+   long:'The persistent self — the ~34 numbers that ARE the character between LLM calls: limbic activations, neuromodulator tone, hormones, Panksepp drives, homeostatic drives (ghrelin, leptin, thirst) fed from below, plus slow exposome variables (allostatic load, fatigue). The LLM is stateless; continuity lives here.'},
   {id:'affect', cx:1330, cy:470, t:'Core affect', d:'valence · arousal · dominance', w:175,
    long:'The constructed-emotion seam (Barrett). Three numbers derived from the whole substrate — valence, arousal, dominance — are the low-dimensional summary the body "feels" and the only somatic state the LLM is shown.'},
   {id:'emotion', cx:1490, cy:300, t:'readEmotion', d:'discrete label', w:150,
    long:'Constructs a discrete emotion label by partitioning the valence×arousal×dominance space, refined by Panksepp drives. Grounded in the body, not in what the LLM says — so the metric measures the substrate, not the prose.'},
   {id:'integrals', cx:1490, cy:540, t:'Integrals', d:'∫cortisol · allostatic load', w:165,
    long:'Time-integrals over affective-state membership — the dependent variables of the study. They turn momentary states into a cumulative dose: minutes anxious/depressed/content, total stress exposure, total reward, allostatic load.'},
-  {id:'memory', cx:1490, cy:760, t:'Memory', d:'salience-gated stream',
-   long:'An affect-gated episodic stream (Generative Agents style). Events are stored with salience set by arousal×cortisol — so emotionally hot moments stick — then decay over time and are retrieved by recency × salience × relevance to seed the next prompt.'},
+  {id:'memory', cx:1490, cy:760, t:'Memory', d:'affective graph',
+   long:'An affect-gated memory GRAPH, not a flat stream: episodic events, semantic gists, entities (people/places) and schemas as text-bearing nodes linked by temporal / associative / about / is-a edges. Encoded with salience = f(arousal, cortisol, |valence|), retrieved by an ACT-R base-level × Generative-Agents score plus one-hop spreading activation, and — during rest — consolidated into gists and reflected into schemas (optionally written by the LLM).'},
+  {id:'physiology', cx:1075, cy:750, t:'Physiology', d:'homeostatic reservoirs', w:190,
+   long:'The plumbing beneath the soma: gut energy (satiety), body water (hydration), bladder, bowel and hygiene — each a reservoir that depletes or fills by a real-ish flux, then DRIVES the soma\'s interoceptive channels (ghrelin/leptin, the thirst osmostat, insular urgency). Consummatory acts (eat / drink / relieve / bathe) reset the reservoirs. This is the causal source of felt hunger, thirst and elimination.'},
+  {id:'needs', cx:1300, cy:719, t:'Maslow needs', d:'deficits → behaviour', w:180,
+   long:'Five need-deficits read straight off the substrate (physiological, safety, belonging, esteem, actualization) — a mirror of core affect, never authored. Maslow PREPOTENCY gates each tier on the satisfaction of those below it to pick a dominant tier; a utility arbiter then turns that into the day\'s emergent behaviour. The deficits also push back on the body (felt need), and consummatory acts close the loop onto physiology.'},
+  {id:'mindlite', cx:120, cy:737, t:'MindLite', d:'interlocutor psyche', w:175,
+   long:'The person Mara is talking to, simulated at LOWER resolution than her full soma — seven coarse scalars (valence, arousal, dominance, warmth, threat, energy, openness) with mood-inertia dynamics. Instantiated when a conversation begins and discarded when it ends (only a one-line ledger gist survives); it makes the exchange two-sided — the partner warms, sours or pushes back, colouring the social events Mara then appraises.'},
   {id:'prompt', cx:830, cy:110, t:'Next prompt', d:'felt state → LLM', kind:'io', w:165,
    long:'Closes the loop. The current felt state is rendered into first-person interoceptive language ("my chest is tight, I feel on edge"), bundled with recalled memories, and handed back to the LLM as context for the next beat. The body\'s history reaches cognition only through this felt summary.'},
 ];
@@ -151,6 +164,14 @@ const EDGES = [
   {s:'soma', t:'prompt', type:'loop', l:'interoception'},
   {s:'emotion', t:'prompt', type:'loop'}, {s:'memory', t:'prompt', type:'loop'},
   {s:'prompt', t:'llm', type:'loop', l:'feedback'},
+  // homeostatic / behavioural tier: physiology ↔ soma ↔ needs ↔ behaviour
+  {s:'physiology', t:'soma', l:'interoception'},
+  {s:'soma', t:'physiology', type:'mod', l:'activity'},
+  {s:'soma', t:'needs', l:'derive'},
+  {s:'needs', t:'soma', type:'loop', l:'felt deficit'},
+  {s:'physiology', t:'needs', l:'reservoirs'},
+  {s:'needs', t:'physiology', type:'loop', l:'eat · drink · bathe'},
+  {s:'mindlite', t:'event', l:'partner reacts'},
 ];
 
 // ---- DETAIL SUB-GRAPHS (auto-laid out by rank) ------------------------------
@@ -168,10 +189,10 @@ const DETAIL = {
     nodes:[
       {id:'sal', t:'salienceHint', d:'sal', rank:0, kind:'family', long:'The event\'s crude salience, scaled into autonomic arousal channels regardless of meaning.'},
       {id:'val', t:'valenceHint', d:'val', rank:0, kind:'family', long:'The event\'s crude valence — only a negative value (with salience) drives the amygdala; a positive value gives a small reward blip.'},
-      {id:'ne', t:'norepinephrine', d:'+= sal·0.30', rank:1, long:'Alertness rises with salience — the orienting/vigilance response.'},
-      {id:'epi', t:'epinephrine', d:'+= sal·0.40', rank:1, long:'Adrenaline surge — the fastest autonomic component of the startle.'},
-      {id:'insula', t:'insula', d:'+= sal·0.30', rank:1, long:'Interoceptive cortex lights up — the "something just happened in my body" signal.'},
-      {id:'amyg', t:'amygdala', d:'+= sal·0.45·gain·(−val)', rank:1, kind:'gain', long:'Threat alarm — fires only for negative-valence events, and is scaled by amygdalaGain, so anxious profiles spike harder for the identical event.'},
+      {id:'ne', t:'norepinephrine', d:'+= sal·0.26', rank:1, long:'Alertness rises with salience — the orienting/vigilance response.'},
+      {id:'epi', t:'epinephrine', d:'+= sal·0.34', rank:1, long:'Adrenaline surge — the fastest autonomic component of the startle.'},
+      {id:'insula', t:'insula', d:'+= sal·0.28', rank:1, long:'Interoceptive cortex lights up — the "something just happened in my body" signal.'},
+      {id:'amyg', t:'amygdala', d:'+= sal·0.36·gain·(−val)', rank:1, kind:'gain', long:'Threat alarm — fires only for negative-valence events, and is scaled by amygdalaGain, so anxious profiles spike harder for the identical event.'},
       {id:'nacc', t:'nacc', d:'+= val·0.30·reward', rank:1, long:'A quick reward blip for positive events, scaled by rewardSensitivity.'},
     ],
     edges:[{s:'sal',t:'ne'},{s:'sal',t:'epi'},{s:'sal',t:'insula'},{s:'val',t:'amyg',type:'mod'},{s:'sal',t:'amyg'},{s:'val',t:'nacc'}],
@@ -271,7 +292,7 @@ const DETAIL = {
     nodes:[
       {id:'revert', t:'mean reversion', d:'k(base−x)', rank:0, long:'Each channel is pulled back toward its baseline at rate k — the Ornstein–Uhlenbeck restoring force. Fast channels (epinephrine) snap back; slow ones (cortisol) linger.'},
       {id:'circ', t:'circadian forcing', d:'cos(2π(t−φ)/24)', rank:0, long:'The baseline itself breathes over the day: mean + amplitude·cos(2π(t−phase)/24). Cortisol peaks near waking (CAR), melatonin deep at night.'},
-      {id:'coup', t:'coupling graph', d:'24 edges', rank:0, long:'Cross-channel influences: amygdala→cortisol +0.9 (HPA drive), vmPFC→amygdala −0.8 (regulation), and 22 more. Individuation rides the gains, not the wiring.'},
+      {id:'coup', t:'coupling graph', d:'29 edges', rank:0, long:'Cross-channel influences: amygdala→cortisol +0.9 (HPA drive), vmPFC→amygdala −0.8 (regulation), and 27 more (including the ghrelin/leptin hunger drive). Individuation rides the gains, not the wiring.'},
       {id:'noise', t:'noise', d:'σ√h·ξ', rank:0, long:'A Wiener increment per channel — the stochastic in stochastic differential equations. Makes runs vary and the agent feel alive.'},
       {id:'euler', t:'Euler–Maruyama', d:'dx = …, h ≤ 0.02h', rank:1, kind:'family', long:'dx = k(base−x)h + Σ(weight·signal)h + σ√h·ξ, summed over sub-steps ≤0.02h so the integrator stays stable for fast rate constants.'},
       {id:'load', t:'allostatic load', d:'∝ amygdala·cortisol', rank:2, long:'After the tick, chronic load accrues from sustained amygdala×cortisol and barely decays — the exposome\'s slow, accumulating memory of stress.'},
@@ -330,11 +351,19 @@ const DETAIL = {
   },
   memory: {
     nodes:[
-      {id:'add', t:'add', d:'salience = f(arousal·cortisol)', rank:0, long:'Stores the event with a salience set by arousal × cortisol — emotionally hot moments are encoded strongly, flat ones barely at all.'},
-      {id:'decay', t:'decayAll', d:'forgetting curve', rank:1, long:'Every tick erodes salience along a forgetting curve, so old neutral events fade while seared ones persist.'},
-      {id:'retrieve', t:'retrieve', d:'recency × salience × overlap', rank:1, long:'Scores memories by recency × salience × keyword overlap with the current event; the top-k are surfaced into the next prompt.'},
+      {id:'episodic', t:'episodic', d:'events', rank:0, kind:'family', long:'Text-bearing event nodes ("a regular learned my name"), tokenized into a keyword bag — the cheap "embedding". Linked to what came just before (temporal) and to co-active context (assoc).'},
+      {id:'entity', t:'entity', d:'people · places', rank:0, kind:'family', long:'Near-permanent nodes for the proper nouns / lexicon in memories (Mara, the Counter, her mother). Episodes link ABOUT them, so recalling a person pulls their episodes.'},
+      {id:'encode', t:'encode', d:'salience-gated', rank:1, long:'Stores an event with salience = f(arousal, cortisol, |valence|, amygdala) — hot moments stick. Pattern separation: a near-duplicate RECONSOLIDATES the existing trace instead of adding a new one.'},
+      {id:'decay', t:'decay', d:'power-law', rank:1, long:'Retrievability (accessibility) decays on a power-law-ish curve each tick — salient traces decay slower; encoding strength (availability) persists. Entities & schemas are near-permanent.'},
+      {id:'retrieve', t:'retrieve', d:'ACT-R × GA + spread', rank:1, long:'Seeds every node by recency + salience + relevance + mood congruence + ACT-R base-level, then spreads one hop along the edges (pattern completion). Top-k seed the next prompt — and recall reconsolidates (strengthens + drifts) them.'},
+      {id:'semantic', t:'semantic gist', d:'consolidate', rank:2, kind:'family', long:'During rest, clusters of similar episodics are fused into ONE first-person takeaway (a belief / pattern) — replay. Written by the LLM if present, else a template.'},
+      {id:'schema', t:'schema', d:'reflect', rank:2, kind:'family', long:'A higher-order insight synthesized from recent high-salience memories ("lately everything asks more of me than I have") — Generative-Agents reflection, off the hot path.'},
     ],
-    edges:[{s:'add',t:'decay'},{s:'add',t:'retrieve'}],
+    edges:[
+      {s:'episodic',t:'encode'},{s:'entity',t:'encode'},
+      {s:'encode',t:'decay'},{s:'encode',t:'retrieve'},
+      {s:'episodic',t:'semantic'},{s:'semantic',t:'schema'},
+    ],
   },
   prompt: {
     nodes:[
@@ -344,6 +373,53 @@ const DETAIL = {
       {id:'assemble', t:'→ LLM driver', d:'feedback', rank:1, kind:'family', long:'All three are assembled into the context handed back to the LLM, closing the loop. The body\'s entire history reaches cognition only through this felt summary.'},
     ],
     edges:[{s:'intero',t:'assemble'},{s:'readout',t:'assemble'},{s:'recall',t:'assemble'}],
+  },
+  physiology: {
+    nodes:[
+      {id:'satiety', t:'satiety', d:'gut energy', rank:0, kind:'family', long:'The gut-energy reserve. Basal + activity metabolism drains it (empties in ~7–10h); a meal refills it. Its emptiness is the true CAUSE of hunger.'},
+      {id:'hydration', t:'hydration', d:'body water', rank:0, kind:'family', long:'Body water. Insensible loss + sweat (scaled by arousal ≈ exertion) drain it in ~6–9h; a drink refills it.'},
+      {id:'bladder', t:'bladder', d:'fills', rank:0, kind:'family', long:'Fills from ongoing diuresis — faster when well hydrated. A toilet trip empties it.'},
+      {id:'bowel', t:'bowel', d:'fills', rank:0, kind:'family', long:'Slow colonic filling from resident food mass; voided at the toilet.'},
+      {id:'hygiene', t:'hygiene', d:'degrades', rank:0, kind:'family', long:'Degrades over a day (sweat, grime); a bath restores it — Mara\'s morning ritual.'},
+      {id:'hunger', t:'ghrelin / leptin', d:'felt hunger', rank:1, long:'Orexigenic ghrelin rises as satiety falls; leptin (the satiety signal) tracks fullness. These are the soma\'s felt-hunger channels — ghrelin recruits SEEKING via the coupling graph.'},
+      {id:'thirst', t:'thirst osmostat', d:'1 − hydration', rank:1, long:'The osmostat writes soma.thirst = 1 − hydration directly — the felt dryness.'},
+      {id:'urg', t:'insular urgency', d:'elimination', rank:1, long:'A full bladder/bowel speaks through the insula — a steep urgency curve that only becomes pressing near full, then dominates the arbiter.'},
+    ],
+    edges:[
+      {s:'satiety',t:'hunger'},{s:'hydration',t:'thirst'},
+      {s:'hydration',t:'bladder'},{s:'bladder',t:'urg'},{s:'bowel',t:'urg'},
+    ],
+  },
+  needs: {
+    nodes:[
+      {id:'phys', t:'physiological', d:'hunger · thirst · …', rank:0, kind:'family', long:'max(hunger, thirst, elimination, energy, sleep pressure, cleanliness) — mostly straight from the physiology reservoirs, plus fatigue & sleep debt.'},
+      {id:'safety', t:'safety', d:'threat + money', rank:0, kind:'family', long:'A soft-OR of somatic threat (cortisol, amygdala, FEAR, a little allostatic load) and material precarity (rent looming vs money on hand).'},
+      {id:'belong', t:'belonging', d:'PANIC + low oxt', rank:0, kind:'family', long:'Separation distress (PANIC_GRIEF) plus the absence of bonding tone (oxytocin & opioid below baseline).'},
+      {id:'esteem', t:'esteem', d:'low dominance', rank:0, kind:'family', long:'An INTERPRETIVE read (no "esteem hormone"): low dominance (felt powerlessness) + depleted da_cort (efficacy) + a quiet PLAY system.'},
+      {id:'actual', t:'actualization', d:'unfed SEEKING', rank:0, kind:'family', long:'Unmet exploratory drive: 1 − how much SEEKING / PLAY is switched on. Growth & curiosity going unfed.'},
+      {id:'prepot', t:'prepotency', d:'Maslow gate', rank:1, long:'w(tier) = base · ∏_lower (1 − k·deficit_lower): a satisfied lower need opens a gate to the next. A SOFT lock — a lonely-but-anxious Mara can still be pulled to the café. Yields the dominant tier.'},
+      {id:'feedback', t:'felt-deficit feedback', d:'→ soma', rank:1, kind:'gain', long:'applyNeedFeedback: an unmet need pushes back on the body so it is FELT — hunger→ghrelin/SEEKING, thirst→hypothalamus, loneliness→PANIC_GRIEF, acute unsafety→cortisol, chronic compound deprivation→allostatic load.'},
+      {id:'arbiter', t:'utility arbiter', d:'emergent behaviour', rank:2, long:'No schedule. Every decision tick a utility competition scores each affordance: Maslow pull (weighted deficit · satisfies) − money / time / energy / travel costs + circadian fit + habit, with feasibility vetoes and hysteresis. The argmax is the intention.'},
+      {id:'acts', t:'consummatory acts', d:'reset reservoirs', rank:3, kind:'family', long:'The chosen intention drives the fast acts — eat / drink / relieve / bathe — which reset the physiology reservoirs, closing the body ↔ behaviour loop.'},
+    ],
+    edges:[
+      {s:'phys',t:'prepot'},{s:'safety',t:'prepot'},{s:'belong',t:'prepot'},{s:'esteem',t:'prepot'},{s:'actual',t:'prepot'},
+      {s:'phys',t:'feedback'},{s:'belong',t:'feedback'},{s:'safety',t:'feedback'},
+      {s:'prepot',t:'arbiter'},{s:'arbiter',t:'acts'},
+    ],
+  },
+  mindlite: {
+    nodes:[
+      {id:'axes', t:'coarse axes', d:'7 scalars', rank:0, kind:'family', long:'valence · arousal · dominance · warmth (oxytocin·CARE) · threat (amygdala·FEAR·cortisol) · energy · openness — the full soma\'s dimensions collapsed to seven scalars.'},
+      {id:'temper', t:'temperament', d:'Big Five + attachment', rank:0, kind:'gain', long:'Set-points the mood reverts toward, from the partner\'s Big Five & attachment: baseValence (E, N), baseThreat (N, attachment), warmthTendency (A, attachment).'},
+      {id:'beat', t:'perceiveBeat', d:'fold the exchange', rank:1, long:'Each interaction beat (warm ∈ [−1,1]) moves valence toward it, warms or raises threat, and updates arousal / dominance — so the partner responds to how the exchange actually felt.'},
+      {id:'inertia', t:'step', d:'mood inertia', rank:1, long:'Between beats the coarse state mean-reverts toward temperament — mood carries over but fades, no full SDE needed.'},
+      {id:'view', t:'somaView', d:'soma-shaped', rank:2, long:'A soma-shaped projection (oxytocin, CARE, FEAR, RAGE, cortisol…) so the SHARED relationship math reads the partner exactly like it reads Mara — the exchange is two-sided without a second full nervous system.'},
+    ],
+    edges:[
+      {s:'temper',t:'beat'},{s:'temper',t:'inertia'},{s:'axes',t:'beat'},
+      {s:'beat',t:'view'},{s:'inertia',t:'view'},
+    ],
   },
 };
 
@@ -358,8 +434,19 @@ function marker(id,color){
 }
 marker('arrow','#1a1a1a'); marker('arrowMod','#7a1f12'); marker('arrowLoop','#5a5142'); marker('arrowNeg','#7a1f12');
 
-const gMain = svg.append('g');
-const gDetail = svg.append('g').style('display','none');
+const gZoom = svg.append('g');
+const gMain = gZoom.append('g');
+const gDetail = gZoom.append('g').style('display','none');
+
+const zoom = d3.zoom()
+  .scaleExtent([0.5, 16])
+  .on('zoom', ev => gZoom.attr('transform', ev.transform));
+svg.call(zoom).on('dblclick.zoom', null);
+function resetZoom(animate){
+  const sel = animate ? svg.transition().duration(280) : svg;
+  sel.call(zoom.transform, d3.zoomIdentity);
+}
+d3.select('#resetZoom').on('click',()=>resetZoom(true));
 
 const panel = {tag:d3.select('#ptag'), title:d3.select('#ptitle'), body:d3.select('#pbody'), hint:d3.select('#phint')};
 const DEFAULT_PANEL = {tag:panel.tag.text(), title:panel.title.text(), body:panel.body.html(), hint:panel.hint.html()};
@@ -448,6 +535,7 @@ function openDetail(node){
   const d=DETAIL[node.id]; if(!d) return;
   const laid=layoutDetail(d);
   drawGraph(gDetail, laid.nodes, laid.edges, {clickable:false});
+  resetZoom(false);
   gMain.transition().duration(160).style('opacity',0).on('end',()=>gMain.style('display','none'));
   gDetail.style('display',null).style('opacity',0).transition().duration(220).style('opacity',1);
   detailTitle.text('inside ▸ '+node.t).style('display','block');
@@ -455,6 +543,7 @@ function openDetail(node){
   showPanel('inside '+node.t, node.t, node.long, 'Hover the inner nodes. Click "back" or press Esc to return.');
 }
 function closeDetail(){
+  resetZoom(false);
   gDetail.transition().duration(160).style('opacity',0).on('end',()=>gDetail.style('display','none'));
   gMain.style('display',null).transition().duration(220).style('opacity',1);
   detailTitle.style('display','none'); backBtn.style('display','none'); resetPanel();

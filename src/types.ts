@@ -275,12 +275,17 @@ export interface WorldSnapshot {
 // ---------------------------------------------------------------------------
 export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string; }
 
+/** A JSON Schema object for structured outputs (constrains the model's answer). */
+export type JsonSchema = Record<string, unknown>;
+
 export interface LLMClient {
   readonly name: string;
-  /** Returns the raw assistant text. `format:'json'` requests JSON-constrained output. */
+  /** Returns the raw assistant text. `format:'json'` requests JSON-constrained
+   *  output; a JsonSchema constrains the answer to that exact shape (structured
+   *  output — used to keep a *thinking* model's answer on-contract). */
   complete(
     messages: ChatMessage[],
-    opts?: { format?: 'json'; temperature?: number; signal?: AbortSignal },
+    opts?: { format?: 'json' | JsonSchema; temperature?: number; signal?: AbortSignal },
   ): Promise<string>;
 }
 
