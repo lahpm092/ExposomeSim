@@ -23,10 +23,10 @@ export function fastAppraise(soma: SomaState, params: SomaParams, ev: WorldEvent
   const sal = clamp(ev.salienceHint ?? 0, 0, 1);
   const val = clamp(ev.valenceHint ?? 0, -1, 1);
   if (sal > 0) {
-    add(soma, 'norepinephrine', sal * 0.30);
-    add(soma, 'epinephrine', sal * 0.40);
-    add(soma, 'insula', sal * 0.30);
-    if (val < 0) add(soma, 'amygdala', sal * 0.45 * params.amygdalaGain * (-val));
+    add(soma, 'norepinephrine', sal * 0.26);
+    add(soma, 'epinephrine', sal * 0.34);
+    add(soma, 'insula', sal * 0.28);
+    if (val < 0) add(soma, 'amygdala', sal * 0.36 * params.amygdalaGain * (-val));
   }
   if (val > 0) add(soma, 'nacc', val * 0.30 * params.rewardSensitivity);
 }

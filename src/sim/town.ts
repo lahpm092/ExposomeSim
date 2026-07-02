@@ -14,16 +14,17 @@
 import type {
   Profile, LLMClient, LLMResponse, WorldEvent, Customer, Vec2, Vec3,
   PlaceId, Intention, CurrentGoal, Resources, NeedsReadout, NeedsIntegrals,
-  NpcLite, Relationship, Ledger, DensityField, TownSnapshot,
+  NpcLite, Relationship, Ledger, DensityField, TownSnapshot, SomaState,
 } from '../types';
 import { Character } from '../harness/character';
+import { MindLite } from '../harness/mindlite';
 import { computeCoreAffect } from '../harness/soma';
 import { CASHIER_PROFILE, sampleProfile } from '../harness/params';
 import { computeNeeds, applyNeedFeedback, emptyNeedIntegrals, updateNeedIntegrals } from '../harness/needs';
 import { PLACES, openNow, travelTime } from './places';
 import {
-  createResources, tickWork, canBuyGroceries, buyGroceries, canEat, consumeMeal,
-  dueRent, payRent,
+  createResources, tickWork, canBuyGroceries, buyGroceries, buyMeal, canEat, consumeMeal,
+  dueRent, payRent, FOOD_VOCAB,
 } from './economy';
 import { chooseIntention } from './arbiter';
 import { newRelationship, updateBond, distillSummary, decayBonds } from './relationship';
@@ -33,15 +34,17 @@ import { buildMessages, parseResponse, fallbackResponse } from '../llm/prompt';
 import { makeCustomer, buildAgenda, IDLE_EVENT } from './events';
 import { mulberry32, clamp, lerp, type RNG } from '../util/num';
 
-// locale geometry (matches Stage's coordinate conventions)
-const COUNTER: Vec3 = { x: 0, y: 0, z: 1.7 };
-const EXIT: Vec3 = { x: 4.2, y: 0, z: 1.7 };
-const waitSlot = (i: number): Vec3 => ({ x: 0, y: 0, z: 3.4 + i * 1.15 });
+// locale geometry — interior-room frame (centred on the building; +z toward the
+// door / town centre). Figures live in this frame; the renderer maps it to world.
+const COUNTER: Vec3 = { x: 0, y: 0, z: 0.2 };            // where the served customer stands
+const EXIT: Vec3 = { x: 2.6, y: 0, z: 3.2 };
+const CAFE_MARA: Vec3 = { x: -1.0, y: 0, z: 0.5 };       // Mara's café table spot
+const waitSlot = (i: number): Vec3 => ({ x: 0, y: 0, z: 1.0 + i * 0.9 });
 const WANDER: Record<string, Vec3> = {
-  apartment: { x: 0, y: 0, z: 1.0 },
+  apartment: { x: 0, y: 0, z: 0.0 },
   counter: COUNTER,
-  market: { x: 0, y: 0, z: 2.0 },
-  cafe: { x: 0, y: 0, z: 1.6 },
+  market: { x: 0, y: 0, z: 0.2 },
+  cafe: { x: 0, y: 0, z: 0.6 },
 };
 // a handful of recurring "locals" at the third place, so re-encounters can bond
 const SOCIAL_SEEDS = [10117, 20431, 30289, 40763];
@@ -56,6 +59,8 @@ export interface TownOpts {
 
 export class Town {
   readonly mara: Character;
+  /** full-resolution protagonists (Mara is [0]; a second can be added at runtime). */
+  readonly protagonists: Character[] = [];
   llm: LLMClient | null;
   speed: number;
   paused = false;
@@ -73,10 +78,12 @@ export class Town {
   goal: CurrentGoal;
 
   figures: NpcLite[] = [];
-  partner: Character | null = null;
+  partnerMind: MindLite | null = null;   // the abstracted, transient interlocutor psyche
   private partnerNpcId: string | null = null;
   private partnerBeatsLeft = 0;
   private socialDone = false; // one real conversation per café visit
+  private shopDecided = false; // one emergent grocery decision per market visit
+  private carriedGroceries = false; // fresh groceries to stow when she gets home
 
   private lastSocialAt: number;
   private socialFuel = 0.55; // slow belonging reservoir: drains alone, refills on contact
@@ -99,12 +106,13 @@ export class Town {
     this.mara = new Character(opts.profile ?? CASHIER_PROFILE, {
       seed: opts.seed ?? 7, startHour: opts.startHour ?? 7.5,
     });
+    this.protagonists.push(this.mara);
     this.llm = opts.llm ?? null;
     this.speed = opts.speed ?? 0.05;
     this.rng = mulberry32(((opts.seed ?? 7) * 2654435761) >>> 0);
     this.resources = createResources(this.clock);
     this.density = createDensity();
-    this.needs = computeNeeds(this.mara.soma, this.resources);
+    this.needs = computeNeeds(this.mara.soma, this.resources, this.mara.phys);
     this.lastSocialAt = this.clock - 8; // start the day a little starved for company
     this.macroPos = { ...PLACES.home.pos2D };
     this.travelFrom = { ...this.macroPos }; this.travelTo = { ...this.macroPos };
@@ -134,7 +142,7 @@ export class Town {
     //    while alone and refills on real contact. A comfortable shut-in therefore
     //    aches for company after a day or two — and a good evening out quiets it.
     this.socialFuel = clamp(this.socialFuel - 0.035 * dt, 0, 1);
-    this.needs = computeNeeds(this.mara.soma, this.resources);
+    this.needs = computeNeeds(this.mara.soma, this.resources, this.mara.phys);
     const lonely = 1 - this.socialFuel;
     this.needs.belonging = Math.max(this.needs.belonging, lonely);
     this.needs.deficit.belonging = Math.max(this.needs.deficit.belonging, lonely);
@@ -149,8 +157,9 @@ export class Town {
     stepDensity(this.density, this.clock, dtReal);
     decayBonds(this.ledger, dt);
 
-    // 4) the partner (if promoted) runs the full soma too, but only now
-    if (this.partner) this.partner.step(dt);
+    // 4) the interlocutor (if promoted) runs its ABSTRACTED psyche — only now,
+    //    at lower causal resolution than Mara's full soma, and dropped after.
+    if (this.partnerMind) this.partnerMind.step(dt);
 
     // 5) macro agency: travel, or arbitrate + run the current locale
     if (this.travelling) {
@@ -237,18 +246,52 @@ export class Town {
     this.nextSpawnAt = this.clock + 0.02; this.lastFinish = this.clock;
     this.localeReady = true;
     this.socialDone = false;
+    this.shopDecided = false;
     if (place === 'thirdplace') this.spawnSocials();
     else if (place === 'market') this.spawnShoppers();
   }
 
   private runLocale(dt: number): void {
+    // quick consummatory acts (drink / toilet / bathe / grab-a-burger) that can
+    // interrupt anything, wherever the affordance exists. If one fires this beat,
+    // the place logic is skipped — she's stepped away to do it.
+    if (this.runConsummatory()) return;
     switch (this.place) {
       case 'work': this.runWork(); break;
-      case 'home': this.runHome(); break;
+      case 'home': this.runHome(dt); break;
       case 'market': this.runMarket(); break;
       case 'thirdplace': this.runThirdPlace(dt); break;
       default: break;
     }
+  }
+
+  /** the fast physiological acts, driven by whichever intention the arbiter chose. */
+  private runConsummatory(): boolean {
+    const k = this.goal.intention.kind;
+    if (k === 'drink' && this.mara.soma.thirst > 0.1) {
+      this.mara.drink();
+      this.feed(this.mara, ev('drink', 'You fill a glass of water and drink it down; the dry edge fades.', 0.12, 0.2));
+      this.shortenDwell(0.05); return true;
+    }
+    if (k === 'relieve' && this.needs.elimination > 0.05) {
+      this.mara.relieve();
+      this.feed(this.mara, ev('relieve', 'You slip away to the restroom; the pressure eases.', 0.1, 0.15));
+      this.shortenDwell(0.05); return true;
+    }
+    if (k === 'bathe' && this.place === 'home' && this.needs.cleanliness > 0.1) {
+      this.mara.takeBath();
+      this.feed(this.mara, ev('bathe', 'You run a warm bath and soak; you feel human again, ready for the day.', 0.18, 0.4));
+      this.shortenDwell(0.12); return true;
+    }
+    if (k === 'buy_meal' && this.place === 'work') {
+      if (buyMeal(this.resources, 5)) { this.mara.eat(0.6); this.feed(this.mara, ev('eat', 'On your break you eat a staff burger at the counter; the hunger backs off.', 0.2, 0.35)); }
+      this.shortenDwell(0.1); return true;
+    }
+    return false;
+  }
+
+  private shortenDwell(h: number): void {
+    this.goal.plannedEnd = Math.min(this.goal.plannedEnd, this.clock + h);
   }
 
   // ---- WORK: the existing counter, now an affordance that pays wage --------
@@ -290,21 +333,37 @@ export class Town {
     this.figures = figs;
   }
 
-  // ---- HOME: eat (consummatory hunger reset) + rest (sleep) ----------------
-  private runHome(): void {
-    // EAT only when genuinely hungry (a meal sates for hours) — not every beat.
-    if (canEat(this.resources) && this.needs.hunger > 0.5) {
-      consumeMeal(this.resources);
-      this.mara.soma.ghrelin = 0.35;         // consummatory reset → lasting satiety
-      this.mara.soma.leptin = 1.7;
-      this.feed(this.mara, ev('eat', 'You heat up something to eat at home and finally sit down.', 0.3, 0.5));
+  // ---- HOME: stow groceries · cook & eat · bathe/toilet (in runConsummatory) · rest
+  private runHome(dt: number): void {
+    // just carried groceries back? put them in the fridge (a one-off on arrival).
+    if (this.carriedGroceries) {
+      this.carriedGroceries = false;
+      const items = this.resources.pantry.slice(-4).join(', ');
+      this.feed(this.mara, ev('stow', `You unpack the groceries into the fridge${items ? ` — ${items}` : ''}.`, 0.15, 0.25));
     }
-    // REST repays fatigue + sleep debt while she's home and depleted.
+    // COOK & EAT when she chose to and there's food to cook (fills the gut reserve).
+    if (this.goal.intention.kind === 'eat' && canEat(this.resources) && this.needs.hunger > 0.4) {
+      consumeMeal(this.resources);
+      this.mara.eat(0.62);
+      this.feed(this.mara, ev('eat', `You cook ${this.pickDish()} at the stove and sit down to eat; the hunger settles.`, 0.3, 0.5));
+      this.shortenDwell(0.4);
+    }
+    // REST repays fatigue + sleep debt AND is restorative to the stress axis:
+    // sleep lowers cortisol toward baseline, quiets the amygdala, and lets a little
+    // allostatic load recover — so a hard day doesn't compound into a spiral.
     if (this.needs.energy > 0.45) {
-      this.mara.soma.fatigue = clamp(this.mara.soma.fatigue - 0.08, 0, 1);
+      const s = this.mara.soma;
+      s.fatigue = clamp(s.fatigue - 0.08, 0, 1);
       this.resources.sleepDebt = Math.max(0, this.resources.sleepDebt - 0.1);
+      s.cortisol += (0.9 - s.cortisol) * 0.07;
+      s.amygdala *= 0.92;
+      s.FEAR *= 0.9; s.PANIC_GRIEF *= 0.92;
+      s.allostaticLoad = Math.max(0, s.allostaticLoad - 0.018); // partial nightly recovery; a residue persists
       if (this.rng() < 0.2) this.feed(this.mara, ev('rest', 'You lie down in your room; the day finally lets go a little.', 0.2, 0.25));
     }
+    // rest is when the hippocampus replays the day: consolidate episodics into
+    // semantic gists + reflect (async, LLM-optional, rate-limited inside rest()).
+    this.mara.rest(dt, this.llm);
   }
 
   // ---- MARKET: convert money → food stock ---------------------------------
@@ -318,12 +377,33 @@ export class Town {
     }
   }
   private runMarket(): void {
-    if (this.goal.intention.kind === 'shop' && canBuyGroceries(this.resources)) {
-      const spent = buyGroceries(this.resources);
-      if (spent > 0) this.feed(this.mara, ev('shop', 'You fill a basket at the market — enough food for a few days.', 0.25, 0.2));
-      // a short dwell, then the arbiter will move her on
-      this.goal.plannedEnd = Math.min(this.goal.plannedEnd, this.clock + 0.1);
+    // one EMERGENT grocery decision per visit: she thinks about what to buy (LLM,
+    // memory-informed); her thought is interpreted into an abstract basket.
+    if (this.goal.intention.kind === 'shop' && canBuyGroceries(this.resources) && !this.shopDecided) {
+      this.shopDecided = true;
+      const money = Math.round(this.resources.money);
+      const e = ev('shop', `You're at the ${PLACES.market.name} with about $${money}, low on food at home. Standing among the fridges and the produce, you think about what to buy for the next few days.`, 0.28, 0.15);
+      this.feedShop(e);
     }
+  }
+
+  /** interpret her shopping thought into groceries (from the food vocabulary),
+   *  stock the fridge, remember the choice, and carry it home to stow. */
+  private stockFromThought(text: string): void {
+    const t = ` ${text.toLowerCase()} `;
+    let items = FOOD_VOCAB.filter((f) => t.includes(f));
+    if (!items.length) items = ['rice', 'eggs', 'vegetables', 'fruit', 'chicken']; // sensible staples
+    items = items.slice(0, 6);
+    buyGroceries(this.resources, items);
+    this.carriedGroceries = true;
+    this.mara.memory.add(this.clock, `At the ${PLACES.market.name} I bought ${items.join(', ')}.`, this.mara.soma);
+    this.shortenDwell(0.12);
+  }
+
+  private pickDish(): string {
+    const p = this.resources.pantry;
+    if (p.length >= 2) { const a = p[p.length - 1], b = p[Math.max(0, p.length - 3)]; return a === b ? a : `${a} and ${b}`; }
+    return p[0] ?? 'something simple';
   }
 
   // ---- THIRD PLACE: the social site — promotion, bonding, demotion ---------
@@ -342,11 +422,11 @@ export class Town {
   private runThirdPlace(dt: number): void {
     if (this.goal.intention.kind !== 'socialize') return;
     // one real conversation per visit: promote the most-familiar present local
-    if (!this.partner && !this.socialDone && this.figures.length) {
+    if (!this.partnerMind && !this.socialDone && this.figures.length) {
       const target = this.pickSocialTarget();
       if (target) this.promotePartner(target);
     }
-    if (this.partner && this.partnerNpcId) {
+    if (this.partnerMind && this.partnerNpcId) {
       this.socialBeat();
       this.partnerBeatsLeft -= 1;
       if (this.partnerBeatsLeft <= 0) { this.demotePartner('the conversation wound down'); this.socialDone = true; }
@@ -364,88 +444,75 @@ export class Town {
     return best;
   }
 
-  // PROMOTE: lift a Tier-1 NPC to a full-sim Character, ONLY for this exchange
+  // PROMOTE: instantiate an ABSTRACTED interlocutor psyche (MindLite), ONLY for
+  // this exchange — lower causal resolution than Mara's soma, carrying just the
+  // coarse mood/warmth the ledger remembers of them.
   private promotePartner(fig: NpcLite): void {
     const prof = sampleProfile(fig.profileSeed);
-    const partner = new Character(prof, { seed: fig.profileSeed, startHour: this.clock });
     const rel = this.ledger.get(fig.id);
-    if (rel) {
-      partner.memory.seed([`I know Mara: ${rel.summary}`], this.clock);
-      if (rel.somaSnapshot) Object.assign(partner.soma, rel.somaSnapshot); // resume chronic load
-    }
-    // a café-goer arrives relatively at ease (not carrying Mara's shift stress) —
-    // so a warm exchange is possible, not foreclosed by two maxed-out nervous systems.
-    partner.soma.amygdala *= 0.5;
-    partner.soma.cortisol = Math.min(partner.soma.cortisol, 1.05);
-    partner.soma.oxytocin = Math.max(partner.soma.oxytocin, 1.1);
-    this.partner = partner;
+    this.partnerMind = new MindLite(prof, {
+      carryValence: rel?.somaSnapshot?.valence ?? 0,
+      carryWarmth: rel ? Math.max(0, rel.affection) : 0,
+    });
     this.partnerNpcId = fig.id;
     this.partnerBeatsLeft = 10 + Math.floor(this.rng() * 6);
     if (!this.ledger.has(fig.id)) this.ledger.set(fig.id, newRelationship(fig.id, fig.profileSeed, fig.name));
   }
 
-  // one beat of two-sided interaction, measured from both real substrates
+  // one beat of two-sided interaction: Mara's full soma vs. the partner's coarse mind
   private socialBeat(): void {
     const rel = this.ledger.get(this.partnerNpcId!)!;
-    const partner = this.partner!;
+    const mind = this.partnerMind!;
     // warmth of this beat: a hopeful baseline + accumulated rapport + the partner's
-    // mood + chance. Compatible, familiar pairs trend warm; clashes sour.
-    const rapport = rel.affection + 0.35 * partner.soma.valence + 0.2 * (this.rng() - 0.5);
+    // coarse mood + chance. Compatible, familiar pairs trend warm; clashes sour.
+    const rapport = rel.affection + 0.35 * mind.valence + 0.2 * (this.rng() - 0.5);
     const warm = clamp(0.55 + rapport, -1, 1);
     const name = rel.name;
-    const v0m = this.mara.soma.valence, v0n = partner.soma.valence;
-    // POV-mirrored event pair
+    const v0m = this.mara.soma.valence, v0n = mind.valence;
     const maraEv = warm >= 0
       ? ev('social', `${name} leans in, easy and warm, and asks how you've really been.`, 0.15, warm, name)
       : ev('social', `${name} is curt and a little dismissive; the talk goes flat.`, 0.45, warm, name);
-    const npcEv = warm >= 0
-      ? ev('social', `Mara meets your eyes and softens; the talk is warm.`, 0.15, clamp(warm * 0.9, -1, 1), 'Mara')
-      : ev('social', `Mara goes quiet and guarded; the talk is stiff.`, 0.45, clamp(warm * 0.9, -1, 1), 'Mara');
     this.feed(this.mara, maraEv);
-    this.feed(partner, npcEv);
-    // a genuinely warm exchange soothes and warms the body — reward (da/5HT) and
-    // oxytocin/CARE up, fear down — so even an anxious person can thaw over a good
-    // conversation. Recompute core affect so this beat's valence delta reflects it.
+    mind.perceiveBeat(clamp(warm * 0.9, -1, 1));  // the partner feels it too (coarsely)
+
+    // a genuinely warm exchange soothes and warms MARA's body — reward (da/5HT) and
+    // oxytocin/CARE up, threat axis (amygdala/FEAR/PANIC/cortisol) down — so even an
+    // anxious person can thaw over a good conversation.
     if (warm > 0) {
-      for (const ch of [this.mara, partner]) {
-        const ss = ch.soma;
-        // social buffering / co-regulation: oxytocin & opioid rise, reward lifts,
-        // and the threat axis (amygdala/FEAR/PANIC/cortisol) is pulled DOWN — this
-        // is how a warm conversation thaws even a wound-tight nervous system.
-        ss.da_meso = clamp(ss.da_meso + warm * 0.1, 0, 4);
-        ss.serotonin = clamp(ss.serotonin + warm * 0.06, 0, 4);
-        ss.oxytocin = clamp(ss.oxytocin + warm * 0.18, 0, 4);
-        ss.opioid = clamp(ss.opioid + warm * 0.12, 0, 4);
-        ss.CARE = clamp(ss.CARE + warm * 0.12, 0, 1);
-        ss.amygdala = clamp(ss.amygdala * (1 - 0.22 * warm), 0, 1);
-        ss.FEAR = clamp(ss.FEAR * (1 - 0.28 * warm), 0, 1);
-        ss.PANIC_GRIEF = clamp(ss.PANIC_GRIEF * (1 - 0.3 * warm), 0, 1);
-        ss.cortisol = ss.cortisol + (1 - ss.cortisol) * 0.15 * warm; // ease toward baseline
-        computeCoreAffect(ss, ch.params);
-      }
+      const ss = this.mara.soma;
+      ss.da_meso = clamp(ss.da_meso + warm * 0.1, 0, 4);
+      ss.serotonin = clamp(ss.serotonin + warm * 0.06, 0, 4);
+      ss.oxytocin = clamp(ss.oxytocin + warm * 0.18, 0, 4);
+      ss.opioid = clamp(ss.opioid + warm * 0.12, 0, 4);
+      ss.CARE = clamp(ss.CARE + warm * 0.12, 0, 1);
+      ss.amygdala = clamp(ss.amygdala * (1 - 0.22 * warm), 0, 1);
+      ss.FEAR = clamp(ss.FEAR * (1 - 0.28 * warm), 0, 1);
+      ss.PANIC_GRIEF = clamp(ss.PANIC_GRIEF * (1 - 0.3 * warm), 0, 1);
+      ss.cortisol = ss.cortisol + (1 - ss.cortisol) * 0.15 * warm;
+      computeCoreAffect(ss, this.mara.params);
     }
     const dM = this.mara.soma.valence - v0m;
-    const dN = partner.soma.valence - v0n;
-    updateBond(rel, this.mara.soma, partner.soma, dM, dN, 0.4, 0.05);
+    const dN = mind.valence - v0n;
+    updateBond(rel, this.mara.soma, mind.somaView() as unknown as SomaState, dM, dN, 0.4, 0.05);
     rel.lastSeen = this.clock;
     // company eases isolation even if the talk is awkward; warmth eases it more.
     this.socialFuel = clamp(this.socialFuel + (warm >= 0 ? 0.1 : 0.04), 0, 1);
     if (warm >= 0) this.lastSocialAt = this.clock;
   }
 
-  // DEMOTE: distill the encounter to a ledger summary + a Mara memory, drop the soma
+  // DEMOTE: distill the encounter to a ledger summary + a Mara memory, drop the mind
   private demotePartner(reason: string): void {
-    if (!this.partner || !this.partnerNpcId) return;
+    if (!this.partnerMind || !this.partnerNpcId) return;
     const rel = this.ledger.get(this.partnerNpcId);
     if (rel) {
       rel.summary = distillSummary(rel, this.mara.readout().label, this.mara.lastResponse?.speech ?? '');
-      rel.somaSnapshot = { allostaticLoad: this.partner.soma.allostaticLoad, cortisol: this.partner.soma.cortisol };
+      rel.somaSnapshot = { valence: this.partnerMind.valence }; // carry coarse mood for next time
       rel.lastSeen = this.clock;
       this.mara.memory.add(this.clock, `At the ${PLACES.thirdplace.name}, ${rel.name}: ${rel.summary} (${reason})`, this.mara.soma);
       const fig = this.figures.find((f) => f.id === this.partnerNpcId);
       if (fig) fig.bonded = true;
     }
-    this.partner = null;
+    this.partnerMind = null;
     this.partnerNpcId = null;
     this.partnerBeatsLeft = 0;
   }
@@ -454,7 +521,8 @@ export class Town {
   private stepFigures(dt: number): void {
     if (this.place === 'work') return; // work figures are queue-positioned
     const wander = WANDER[PLACES[this.place].localeKind] ?? { x: 0, y: 0, z: 1.5 };
-    const ctx: LiteCtx = { maraPos: COUNTER, exit: EXIT, wander, rng: this.rng };
+    const maraPos = this.place === 'thirdplace' ? CAFE_MARA : COUNTER;
+    const ctx: LiteCtx = { maraPos, exit: EXIT, wander, rng: this.rng };
     this.figures = this.figures.filter((f) => !stepNpcLite(f, dt, ctx));
   }
 
@@ -466,7 +534,7 @@ export class Town {
       this.pendingLLM = true;
       void this.driveLLM(e).finally(() => { this.pendingLLM = false; });
     } else {
-      ch.applyDriverResponse(e, fallbackResponse(ch.soma, ch.readout()));
+      ch.applyDriverResponse(e, fallbackResponse(ch.soma, ch.readout(), e));
     }
   }
 
@@ -476,8 +544,34 @@ export class Town {
     const messages = buildMessages(this.mara.profile, soma, readout, mems, e);
     let resp: LLMResponse;
     try { resp = parseResponse(await this.llm!.complete(messages, { format: 'json', temperature: 0.7 }), soma, readout); }
-    catch { resp = fallbackResponse(soma, readout); }
+    catch { resp = fallbackResponse(soma, readout, e); }
     this.mara.applyDriverResponse(e, resp);
+  }
+
+  // the grocery decision: like feed(), but her thought is then interpreted into a
+  // basket (memory-informed via the recall query — surfaces her food preferences).
+  private feedShop(e: WorldEvent): void {
+    this.currentEvent = e;
+    this.mara.perceive(e);
+    if (this.llm && !this.pendingLLM) {
+      this.pendingLLM = true;
+      void this.driveShop(e).finally(() => { this.pendingLLM = false; });
+    } else {
+      const resp = fallbackResponse(this.mara.soma, this.mara.readout(), e);
+      this.mara.applyDriverResponse(e, resp);
+      this.stockFromThought(resp.speech + ' ' + (resp.innerMonologue ?? ''));
+    }
+  }
+
+  private async driveShop(e: WorldEvent): Promise<void> {
+    const soma = this.mara.soma, readout = this.mara.readout();
+    const mems = this.mara.recall('food buy market cook eat groceries rice eggs vegetables', 4);
+    const messages = buildMessages(this.mara.profile, soma, readout, mems, e);
+    let resp: LLMResponse;
+    try { resp = parseResponse(await this.llm!.complete(messages, { format: 'json', temperature: 0.8 }), soma, readout); }
+    catch { resp = fallbackResponse(soma, readout, e); }
+    this.mara.applyDriverResponse(e, resp);
+    this.stockFromThought(`${resp.speech} ${resp.innerMonologue ?? ''}`);
   }
 
   // ===================== public API =====================================
@@ -499,7 +593,8 @@ export class Town {
       intention: this.goal.intention, day: this.day, weekend: this.weekend,
       density: this.density, locale: { figures: this.figures },
       relationships: [...this.ledger.values()].sort((a, b) => b.familiarity - a.familiarity),
-      partner: this.partner?.snapshot(),
+      partner: this.partnerMind?.view(),
+      protagonists: this.protagonists.map((p) => p.profile.name),
     };
   }
 }

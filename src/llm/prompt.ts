@@ -130,19 +130,35 @@ export function parseResponse(raw: string, soma: SomaState, readout: EmotionRead
   };
 }
 
-/** soma-grounded fallback so a flaky tiny model never freezes the world */
-export function fallbackResponse(soma: SomaState, readout: EmotionReadout): LLMResponse {
-  const neg = soma.valence < -0.1;
+/**
+ * Soma-grounded fallback so a flaky/absent model never freezes the world. When an
+ * event is supplied it appraises by the event's ACTUAL pleasantness (the world's
+ * valence), not merely the current mood — otherwise a stressed character would
+ * appraise even a warm gesture as threatening (a mood-congruent doom loop that
+ * poisons offline bonding). The body still colours the response (coping, tone).
+ */
+export function fallbackResponse(soma: SomaState, readout: EmotionReadout, ev?: WorldEvent): LLMResponse {
+  const evVal = ev?.valenceHint;
+  const pleasant = typeof evVal === 'number' ? clamp(evVal, -1, 1) : soma.valence;
+  const sal = clamp(ev?.salienceHint ?? Math.abs(soma.valence), 0, 1);
+  const neg = pleasant < -0.1;
+  const other = !!ev?.source && ev.source !== 'circumstance';
   return {
     appraisal: {
-      novelty: 0.3, pleasantness: soma.valence, goalRelevance: 0.5,
-      goalCongruence: soma.valence, agency: 'circumstance', blameworthiness: 0,
-      copingPotential: clamp(0.5 + soma.dominance * 0.4, 0, 1), certainty: 0.5,
-      normCompatibility: 0, urgency: soma.arousal,
+      novelty: clamp(ev?.salienceHint ?? 0.3, 0, 1),
+      pleasantness: pleasant,
+      goalRelevance: clamp(0.4 + sal * 0.4, 0, 1),
+      goalCongruence: pleasant,
+      agency: other ? 'other' : 'circumstance',
+      blameworthiness: neg && other ? -Math.min(1, -pleasant) : pleasant > 0.3 && other ? 0.3 : 0,
+      copingPotential: clamp(0.5 + soma.dominance * 0.4, 0, 1),
+      certainty: 0.5,
+      normCompatibility: pleasant > 0.2 ? 0.4 : pleasant < -0.3 ? -0.3 : 0,
+      urgency: clamp(ev?.salienceHint ?? soma.arousal, 0, 1),
     },
     emotion: readout.label,
-    regulation: neg && soma.dlPFC > 0.3 ? 'reappraisal' : 'none',
-    speech: neg ? 'Sorry — one moment.' : 'Sure, coming right up.',
+    regulation: neg && soma.dlPFC > 0.2 ? 'reappraisal' : 'none',
+    speech: neg ? 'Sorry — one moment.' : pleasant > 0.3 ? 'Thank you — really.' : 'Sure, coming right up.',
     action: 'wait',
     innerMonologue: undefined,
   };

@@ -41,6 +41,39 @@ const EAT: Affordance = {
   needsFoodStock: true,
 };
 
+/** Drink water — reset the hypothalamic osmostat. Nearly free, quick, available
+ *  wherever there's a tap: home, the market, the café, a park fountain. */
+const DRINK: Affordance = {
+  kind: 'drink',
+  tier: 'physiological',
+  satisfies: 0.9,
+  costMoney: 0,
+  costEnergy: 0.0,
+  durHours: 0.15,
+};
+
+/** Use a toilet — void bladder/bowel. Trivial cost, but its NEED (elimination)
+ *  is steep near-full, so it can override a shift. Wherever there's a restroom. */
+const TOILET: Affordance = {
+  kind: 'relieve',
+  tier: 'physiological',
+  satisfies: 0.95,
+  costMoney: 0,
+  costEnergy: 0.0,
+  durHours: 0.08,
+};
+
+/** A warm bath at home — restores hygiene; a mild self-care that reads as a
+ *  morning ritual (via circadian fit + a habit memory), not a hard schedule. */
+const BATHE: Affordance = {
+  kind: 'bathe',
+  tier: 'physiological',
+  satisfies: 0.9,
+  costMoney: 0,
+  costEnergy: -0.02,       // mildly restorative
+  durHours: 0.4,
+};
+
 /** A shift behind the counter — the income source; tiring but esteem-bearing. */
 const WORK: Affordance = {
   kind: 'work',
@@ -49,6 +82,17 @@ const WORK: Affordance = {
   costMoney: -90,          // NEGATIVE: a shift EARNS wage
   costEnergy: 0.5,
   durHours: 8,
+};
+
+/** Grab a staff burger at work — prepared food for a few dollars; the only food
+ *  source besides cooking groceries from home. Sates hunger without the pantry. */
+const BUY_MEAL: Affordance = {
+  kind: 'buy_meal',
+  tier: 'physiological',
+  satisfies: 0.62,         // a burger takes the edge off but she still cooks properly later
+  costMoney: 5,
+  costEnergy: 0.02,
+  durHours: 0.4,
 };
 
 /** Grocery run — converts money into home foodStock (the orchestrator restocks).
@@ -97,7 +141,7 @@ export const PLACES: Record<PlaceId, Place> = {
     openHours: [0, 24],
     capacity: 1,
     localeKind: 'apartment',
-    affordances: [REST, EAT],
+    affordances: [REST, EAT, DRINK, TOILET, BATHE],
   },
   work: {
     id: 'work',
@@ -106,7 +150,7 @@ export const PLACES: Record<PlaceId, Place> = {
     openHours: [8, 22],
     capacity: 8,
     localeKind: 'counter',
-    affordances: [WORK],
+    affordances: [WORK, DRINK, TOILET, BUY_MEAL],
   },
   market: {
     id: 'market',
@@ -115,7 +159,7 @@ export const PLACES: Record<PlaceId, Place> = {
     openHours: [8, 21],
     capacity: 12,
     localeKind: 'market',
-    affordances: [SHOP],
+    affordances: [SHOP, DRINK],
   },
   thirdplace: {
     id: 'thirdplace',
@@ -124,7 +168,7 @@ export const PLACES: Record<PlaceId, Place> = {
     openHours: [15, 24],
     capacity: 6,
     localeKind: 'cafe',
-    affordances: [SOCIALIZE],
+    affordances: [SOCIALIZE, DRINK],
   },
   // stub node — present so PlaceId stays total; cheap optional novelty sink.
   park: {
@@ -134,7 +178,7 @@ export const PLACES: Record<PlaceId, Place> = {
     openHours: [6, 22],
     capacity: 20,
     localeKind: 'park',
-    affordances: [LINGER],
+    affordances: [LINGER, DRINK],
   },
 };
 

@@ -247,6 +247,8 @@ export const CASHIER_PROFILE: Profile = {
     formativeMemories: [
       'A manager once humiliated her in front of customers; she still hears it.',
       'A regular customer learned her name and it made her whole week.',
+      'Every morning I bathe at home before my shift — a warm bath is how I feel human and start the day.',
+      'I like simple home cooking — rice, eggs, vegetables, chicken and fruit; I avoid junk food when I can.',
     ],
   },
 };
