@@ -153,8 +153,33 @@ body::before {
 .soma-row.sel { background: var(--ink); color: var(--paper); }
 .soma-row.sel b { color: var(--paper); }
 
-/* ---- city view (zoomed-out town) ---- */
+/* ---- stage overlays: city minimap · memory graph · psyche signature ---- */
 .cityview { position: absolute; inset: 0; z-index: 5; display: none; }
+.memoryviz { position: absolute; inset: 0; z-index: 6; display: none; }
+.psycheviz {
+  position: absolute; right: calc(var(--u) * 2); bottom: calc(var(--u) * 2); z-index: 7;
+  display: block;
+}
+
+/* the brain panel's inline LIVE toggle sits on the panel title */
+.brain-live-btn { margin-left: auto; padding: 1px 6px; font-size: 9px; }
+.panel.brain-panel > h2 { display: flex; align-items: center; }
+
+/* Mara's speech / verbal-thought bubble, tracking her head in the 3D view */
+.speech-bubble {
+  position: absolute; z-index: 8; transform: translate(-50%, -100%);
+  max-width: 32ch; padding: 5px 9px;
+  font-family: var(--serif); font-size: 14px; font-style: italic; line-height: 1.35;
+  color: var(--ink); background: rgba(233, 222, 196, 0.94);
+  border: 1px solid var(--line); border-radius: 3px;
+  pointer-events: none; white-space: normal; text-align: center;
+  box-shadow: 0 1px 0 rgba(120, 95, 55, 0.25);
+}
+.speech-bubble::after {
+  content: ""; position: absolute; left: 50%; bottom: -6px; transform: translateX(-50%);
+  border-left: 6px solid transparent; border-right: 6px solid transparent;
+  border-top: 6px solid rgba(233, 222, 196, 0.94);
+}
 
 /* ---- town panel (the emergent life) ---- */
 .town-where { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-soft); }

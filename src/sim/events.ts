@@ -22,7 +22,7 @@ const DEMEANOR_VALENCE: Record<Demeanor, number> = {
 
 export function makeCustomer(rng: RNG, spawnSlot: Vec3, t: number): Customer {
   const demeanor = weightedPick<Demeanor>(rng, [
-    ['polite', 0.34], ['neutral', 0.33], ['warm', 0.10], ['impatient', 0.14], ['rude', 0.09],
+    ['polite', 0.38], ['neutral', 0.33], ['warm', 0.15], ['impatient', 0.09], ['rude', 0.05],
   ]);
   return {
     id: uid('c'),
@@ -51,9 +51,9 @@ export function buildAgenda(c: Customer, rng: RNG): WorldEvent[] {
 
   // a twist, weighted by demeanor
   if (c.demeanor === 'rude') {
-    list.push(ev('rude', `${c.name} snaps: "Are you even listening? Hurry up."`, 0.8, -0.85, c.name));
+    list.push(ev('rude', `${c.name} snaps: "Are you even listening? Hurry up."`, 0.6, -0.6, c.name));
   } else if (c.demeanor === 'impatient') {
-    list.push(ev('impatient', `${c.name} sighs loudly and drums their fingers on the counter.`, 0.5, -0.45, c.name));
+    list.push(ev('impatient', `${c.name} sighs loudly and drums their fingers on the counter.`, 0.4, -0.35, c.name));
   } else if (c.demeanor === 'warm') {
     list.push(ev('compliment', `${c.name} says warmly: "You're doing great, take your time."`, 0.45, 0.75, c.name));
   } else if (rng() < 0.18) {

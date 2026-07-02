@@ -43,12 +43,20 @@ export function createResources(clock: number): Resources {
   return {
     money: 60,
     foodStock: 2,
+    pantry: ['eggs', 'bread'],
     sleepDebt: 2,
     rentDue: RENT,
     rentDueAt: clock + RENT_PERIOD,
     wageEarned: 0,
   };
 }
+
+/** the small food vocabulary the market stocks — used to interpret her thoughts. */
+export const FOOD_VOCAB = [
+  'rice', 'eggs', 'bread', 'milk', 'chicken', 'vegetables', 'greens', 'tomatoes',
+  'beans', 'pasta', 'fruit', 'apples', 'bananas', 'yogurt', 'cheese', 'coffee',
+  'oats', 'fish', 'potatoes', 'onions', 'soup', 'cereal', 'chips', 'cookies',
+];
 
 // ---- income -----------------------------------------------------------------
 
@@ -71,14 +79,24 @@ export function canBuyGroceries(r: Resources): boolean {
 }
 
 /**
- * Buy groceries: spend GROCERY_COST, add GROCERY_UNITS to the larder, return
- * the cost. If she can't afford it, no-op and return 0.
+ * Buy groceries: spend GROCERY_COST, add GROCERY_UNITS meals to the larder and
+ * the named `items` to the fridge (an abstract inventory). Returns the cost, or 0
+ * if she can't afford it. `items` are the emergent choices (from her thoughts).
  */
-export function buyGroceries(r: Resources): number {
+export function buyGroceries(r: Resources, items: string[] = []): number {
   if (!canBuyGroceries(r)) return 0;
   r.money -= GROCERY_COST;
   r.foodStock += GROCERY_UNITS;
+  for (const it of items) if (!r.pantry.includes(it)) r.pantry.push(it);
+  if (r.pantry.length > 14) r.pantry.splice(0, r.pantry.length - 14); // fridge is finite
   return GROCERY_COST;
+}
+
+/** Buy a prepared meal (the staff burger at work) for `cost`. Returns success. */
+export function buyMeal(r: Resources, cost: number): boolean {
+  if (r.money < cost) return false;
+  r.money -= cost;
+  return true;
 }
 
 // ---- eating -----------------------------------------------------------------

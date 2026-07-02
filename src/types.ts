@@ -104,6 +104,10 @@ export interface SomaState {
   arousal: number;           // [0,1]
   dominance: number;         // [-1,1]
 
+  // hypothalamic homeostatic drives ∈ [0,1] (osmostat/glucostat-style detectors,
+  // managed outside the OU integrator: they climb with deprivation, reset on relief)
+  thirst: number;            // osmotic/volume deficit — rises with time & heat, reset by drinking
+
   // slow integrators / load
   allostaticLoad: number;    // accumulates with chronic activation; shifts set-points
   fatigue: number;           // [0,1] depletes control capacity
@@ -215,6 +219,15 @@ export interface MemoryItem {
   decay: number;             // current retrievability
 }
 
+// ---- symbolic memory GRAPH (see src/harness/memgraph.ts, MEMORY_DESIGN.md) ---
+export type MemNodeKind = 'episodic' | 'semantic' | 'entity' | 'schema';
+export type MemEdgeKind = 'temporal' | 'assoc' | 'about' | 'is_a' | 'causal';
+/** A bounded snapshot of a character's memory graph for the live visualization. */
+export interface MemGraphView {
+  nodes: { id: string; kind: MemNodeKind; text: string; salience: number; valence: number; retr: number; act: number }[];
+  edges: { a: string; b: string; kind: MemEdgeKind; w: number }[];
+}
+
 // ---------------------------------------------------------------------------
 // 9. SIMULATION WORLD
 // ---------------------------------------------------------------------------
@@ -242,8 +255,10 @@ export interface CashierPublic {
   integrals: EmotionIntegrals;
   lastResponse?: LLMResponse;
   recentMemories: MemoryItem[];
+  memoryGraph?: MemGraphView;      // live snapshot of the symbolic memory graph
   needs?: NeedsReadout;            // Maslow deficits read off the soma (town layer)
   needsIntegrals?: NeedsIntegrals;
+  physiology?: Physiology;         // homeostatic reservoirs (town layer)
 }
 
 export interface WorldSnapshot {
@@ -283,18 +298,36 @@ export type NeedTier = 'physiological' | 'safety' | 'belonging' | 'esteem' | 'ac
 
 /** Each field is a DEFICIT in [0,1] — 1 = maximally unmet. */
 export interface NeedsReadout {
-  hunger: number; energy: number; safety: number; belonging: number; esteem: number; novelty: number;
+  hunger: number; thirst: number; energy: number;
+  elimination: number;  // urgency to void bladder/bowel (steep near-full)
+  cleanliness: number;  // hygiene deficit (rises since last bath)
+  safety: number; belonging: number; esteem: number; novelty: number;
   deficit: Record<NeedTier, number>;
   dominantTier: NeedTier;
 }
 export interface NeedsIntegrals {
-  minutesHungry: number; minutesLonely: number; minutesDepleted: number; minutesUnsafe: number;
+  minutesHungry: number; minutesThirsty: number; minutesLonely: number; minutesDepleted: number; minutesUnsafe: number;
+}
+
+// ---------------------------------------------------------------------------
+// PHYSIOLOGY — a low-abstraction homeostatic reservoir layer that is the causal
+// SOURCE of felt hunger/thirst/urgency (it drives soma ghrelin/leptin/thirst).
+// Reservoirs deplete/fill by real-ish flux; behaviour emerges when the arbiter
+// scores the resulting needs. Nothing here is scripted. See harness/physiology.ts.
+// ---------------------------------------------------------------------------
+export interface Physiology {
+  satiety: number;    // 0..1 gut-energy reserve: +eating, −basal+activity metabolism
+  hydration: number;  // 0..1 body water: +drinking, −insensible loss + sweat
+  bladder: number;    // 0..1 fullness: fills from fluid throughput, void at a toilet
+  bowel: number;      // 0..1 fullness: fills slowly from food mass, void at a toilet
+  hygiene: number;    // 0..1 cleanliness: decays with time, restored by bathing
 }
 
 // ---- places & affordances (the only authored content) ----------------------
 export type PlaceId = 'home' | 'work' | 'market' | 'thirdplace' | 'park';
 export type IntentionKind =
-  | 'eat' | 'rest' | 'work' | 'shop' | 'socialize' | 'go_home' | 'linger';
+  | 'eat' | 'buy_meal' | 'drink' | 'relieve' | 'bathe'
+  | 'rest' | 'work' | 'shop' | 'socialize' | 'go_home' | 'linger';
 
 export interface Affordance {
   kind: IntentionKind;
@@ -334,7 +367,8 @@ export interface CurrentGoal {
 // ---- the resource economy (binding constraints that close the loop) --------
 export interface Resources {
   money: number;
-  foodStock: number;       // meals on hand at home
+  foodStock: number;       // cookable meals on hand at home
+  pantry: string[];        // named groceries in the fridge (abstract inventory)
   sleepDebt: number;       // hours
   rentDue: number;         // amount owed at rentDueAt
   rentDueAt: number;       // clock (absolute sim-hours) when rent is charged
@@ -384,6 +418,15 @@ export interface DensityField {
 }
 
 // ---- the town snapshot the renderers read each frame -----------------------
+/** A coarse read of the currently-promoted interlocutor's abstracted psyche
+ *  (MindLite runs at lower causal resolution than the protagonist's full soma). */
+export interface PartnerView {
+  name: string;
+  label: string;
+  valence: number; arousal: number; dominance: number;
+  warmth: number;  threat: number;   // the two coarse limbic axes
+}
+
 export interface TownSnapshot extends WorldSnapshot {
   place: PlaceId;
   macroPos: Vec2;          // Mara's town position (interpolated while travelling)
@@ -397,5 +440,18 @@ export interface TownSnapshot extends WorldSnapshot {
   density: DensityField;
   locale: { figures: NpcLite[] };
   relationships: Relationship[];
-  partner?: CashierPublic; // the currently-promoted full-sim interaction partner
+  partner?: PartnerView;   // the currently-promoted, abstracted interaction partner
+  protagonists?: string[]; // names of full-resolution protagonists in the sim
+  others?: OtherAgentView[]; // additional full-resolution protagonists, for rendering
+}
+
+/** A second full-resolution protagonist, projected for the renderer + dashboard. */
+export interface OtherAgentView {
+  name: string;
+  place: PlaceId;
+  macroPos: Vec2;
+  travelling: boolean;
+  valence: number; arousal: number; dominance: number; amygdala: number; cortisol: number;
+  label: string;
+  reason: string;
 }

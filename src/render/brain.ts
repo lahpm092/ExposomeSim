@@ -19,6 +19,7 @@
 import * as THREE from 'three';
 import type { WorldSnapshot, SomaChannel, SomaState } from '../types';
 import { PALETTE, C, lineMaterial, disposeObject, clampNum } from './palette';
+import { isModulator } from '../harness/params';
 
 // ---- channel → responsible structure id(s) ---------------------------------
 const CH2REG: Record<SomaChannel, string[]> = {
@@ -50,12 +51,36 @@ const CH2REG: Record<SomaChannel, string[]> = {
   PANIC_GRIEF:    ['pag', 'dACC'],
   PLAY:           ['pag', 'nacc'],
   LUST:           ['hypothalamus', 'vta'],
+  thirst:         ['hypothalamus', 'insula'],
   allostaticLoad: ['amygdala', 'hippocampus', 'hypothalamus', 'pituitary', 'vmPFC'],
   fatigue:        ['dlPFC', 'hypothalamus', 'insula'],
   valence:        ['vmPFC', 'nacc', 'amygdala', 'insula'],
   arousal:        ['lc', 'amygdala', 'hypothalamus', 'dACC'],
   dominance:      ['dlPFC', 'vmPFC', 'nacc', 'amygdala'],
 };
+
+// reverse map: which soma channels drive each anatomical region (from CH2REG),
+// so the region can glow with the LIVE sum of those channels' activation.
+const REGION_CHANNELS: Record<string, SomaChannel[]> = (() => {
+  const m: Record<string, SomaChannel[]> = {};
+  for (const ch of Object.keys(CH2REG) as SomaChannel[]) {
+    for (const reg of CH2REG[ch]) (m[reg] ??= []).push(ch);
+  }
+  return m;
+})();
+const THREAT_REGIONS = new Set(['amygdala', 'pag', 'lc', 'dACC', 'pituitary']);
+const REWARD_REGIONS = new Set(['nacc', 'vta']);
+
+/** a channel's live activation in [0,1] (modulators read deviation from baseline 1). */
+function channelIntensity(soma: SomaState, ch: SomaChannel): number {
+  const v = soma[ch] as number;
+  if (!Number.isFinite(v)) return 0;
+  if (ch === 'allostaticLoad') return clampNum(v / 12, 0, 1);
+  if (ch === 'valence' || ch === 'dominance') return clampNum(Math.abs(v), 0, 1);
+  if (ch === 'arousal') return clampNum(v, 0, 1);
+  if (isModulator(ch)) return clampNum(Math.abs(v - 1) / 1.3, 0, 1);
+  return clampNum(v, 0, 1); // activations, drives, fatigue, thirst
+}
 
 const REGION_NAME: Record<string, string> = {
   cortex: 'Neocortex', insula: 'Insula', vmPFC: 'vmPFC / OFC', dlPFC: 'dlPFC', dACC: 'Dorsal ACC',
@@ -81,14 +106,14 @@ const CHANNEL_ORDER: SomaChannel[] = [
   'amygdala', 'hippocampus', 'nacc', 'insula', 'hypothalamus',
   'vmPFC', 'dlPFC',
   'SEEKING', 'FEAR', 'RAGE', 'CARE', 'PANIC_GRIEF', 'PLAY', 'LUST',
-  'allostaticLoad', 'fatigue',
+  'thirst', 'allostaticLoad', 'fatigue',
   'valence', 'arousal', 'dominance',
 ];
 const GROUPS: { title: string; start: number }[] = [
   { title: 'Neuromodulators', start: 0 }, { title: 'Hormones', start: 9 },
   { title: 'Limbic nodes', start: 14 }, { title: 'Cortical', start: 19 },
-  { title: 'Panksepp drives', start: 21 }, { title: 'Slow integrators', start: 28 },
-  { title: 'Core affect', start: 30 },
+  { title: 'Panksepp drives', start: 21 }, { title: 'Homeostatic · slow', start: 28 },
+  { title: 'Core affect', start: 31 },
 ];
 const LABELS: Record<SomaChannel, string> = {
   da_meso: 'Mesolimbic dopamine', da_cort: 'Mesocortical dopamine', serotonin: 'Serotonin',
@@ -98,7 +123,7 @@ const LABELS: Record<SomaChannel, string> = {
   amygdala: 'Amygdala', hippocampus: 'Hippocampus', nacc: 'Nucleus accumbens', insula: 'Insula', hypothalamus: 'Hypothalamus',
   vmPFC: 'vmPFC (reappraisal)', dlPFC: 'dlPFC (control)',
   SEEKING: 'SEEKING', FEAR: 'FEAR', RAGE: 'RAGE', CARE: 'CARE', PANIC_GRIEF: 'PANIC / GRIEF', PLAY: 'PLAY', LUST: 'LUST',
-  allostaticLoad: 'Allostatic load', fatigue: 'Fatigue',
+  thirst: 'Thirst (osmostat)', allostaticLoad: 'Allostatic load', fatigue: 'Fatigue',
   valence: 'Valence', arousal: 'Arousal', dominance: 'Dominance',
 };
 
@@ -140,6 +165,8 @@ export class BrainPanel {
   private clock = 0;
   private hidden = false;
   private ready = false;
+  private live = true;         // regions glow with live soma activation
+  private liveBtn!: HTMLButtonElement;
 
   // orbit state
   private readonly tgt = new THREE.Vector3(0, 0.0, 0);
@@ -174,6 +201,17 @@ export class BrainPanel {
     this.litEl.className = 'brain-lit';
     this.litEl.textContent = 'loading MRI surfaces…';
     this.panel.appendChild(this.litEl);
+
+    // a small LIVE toggle: real-time activation glow vs. static inspect
+    this.liveBtn = document.createElement('button');
+    this.liveBtn.className = 'toggle brain-live-btn';
+    this.liveBtn.textContent = 'LIVE';
+    this.liveBtn.title = 'Glow regions by live soma activation';
+    this.liveBtn.onclick = () => {
+      this.live = !this.live;
+      this.liveBtn.classList.toggle('off', !this.live);
+    };
+    h2.appendChild(this.liveBtn);
 
     const list = document.createElement('ul');
     list.className = 'soma-list';
@@ -353,6 +391,15 @@ export class BrainPanel {
     this.litEl.textContent = names.length ? `lit · ${names.join(' · ')}` : '';
   }
 
+  /** live activation of an anatomical region = max over the channels that drive it. */
+  private regionActivation(id: string, soma: SomaState): number {
+    const chans = REGION_CHANNELS[id];
+    if (!chans) return 0;
+    let a = 0;
+    for (const ch of chans) { const i = channelIntensity(soma, ch); if (i > a) a = i; }
+    return a;
+  }
+
   private hotColor(ch: SomaChannel, s: SomaState | undefined): THREE.Color {
     if (!s) return C.ink;
     if (ch === 'amygdala' && s.amygdala > 0.6) return C.accent;
@@ -377,10 +424,22 @@ export class BrainPanel {
         const ck = 1 - Math.exp(-3 * dt);
         const tint = this.hotColor(ch, soma);
         for (const [id, rv] of this.regions) {
-          const on = hot.includes(id);
-          rv.mat.opacity += (rv.tOpacity - rv.mat.opacity) * k;
+          const cursorOn = hot.includes(id);
+          // base target: the cursor-selected region(s) go opaque; others rest faint
+          let target = cursorOn ? (id === 'cortex' ? CORTEX_HILITE : 1) : rv.base;
+          let col = C.ink;
+          // LIVE glow: every region brightens with the current activation of the
+          // soma channels that drive it — the brain lights up as the psyche runs.
+          if (this.live && soma) {
+            const act = this.regionActivation(id, soma);
+            const liveOp = rv.base + act * (id === 'cortex' ? 0.4 : 0.9);
+            if (liveOp > target) target = liveOp;
+            if (act > 0.28) col = THREAT_REGIONS.has(id) ? C.accent : REWARD_REGIONS.has(id) ? C.good : C.ink;
+          }
+          if (cursorOn) col = tint;                 // the inspected channel wins the tint
+          rv.mat.opacity += (Math.min(1, target) - rv.mat.opacity) * k;
           rv.mat.depthWrite = rv.mat.opacity >= 0.55;
-          rv.mat.color.lerp(on ? tint : C.ink, ck);
+          rv.mat.color.lerp(col, ck);
         }
         if (soma) for (const r of this.rows) { const t = fmt(soma[r.key]); if (t !== r.cache) { r.cache = t; r.b.textContent = t; } }
       } catch { /* never break the host loop */ }

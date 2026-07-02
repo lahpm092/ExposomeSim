@@ -6,9 +6,11 @@
 // =============================================================================
 import { Town } from './sim/town';
 import { OllamaClient, probeOllama } from './llm/client';
-import { Stage } from './render/stage';
+import { CityStage } from './render/citystage';
 import { BrainPanel } from './render/brain';
 import { CityView } from './render/cityview';
+import { PsychePanel } from './render/psycheviz';
+import { MemoryPanel } from './render/memoryviz';
 import { TownPanel } from './ui/townpanel';
 import { Dashboard } from './ui/dashboard';
 import type { TownSnapshot } from './types';
@@ -35,14 +37,16 @@ async function boot() {
 
   const titlebar = document.getElementById('titlebar')!;
   const stageEl = document.getElementById('stage')!;
-  const town = new Town({ llm, startHour: 7.5, speed: 0.3 });
-  const stage = new Stage(canvas);
+  const town = new Town({ llm, startHour: 7.5, speed: 0.12 });
+  const stage = new CityStage(canvas);
   const dashboard = new Dashboard(dashEl);
   const townPanel = new TownPanel(dashEl);
   const brain = new BrainPanel(dashEl, titlebar);
   const city = new CityView(stageEl, titlebar);
+  const psyche = new PsychePanel(stageEl, titlebar);
+  const memory = new MemoryPanel(stageEl, titlebar);
 
-  addEventListener('resize', () => { stage.resize(); brain.resize(); city.resize(); });
+  addEventListener('resize', () => { stage.resize(); brain.resize(); city.resize(); psyche.resize(); memory.resize(); });
   addEventListener('keydown', (e) => {
     if (e.code === 'Space') { e.preventDefault(); town.togglePause(); }
     else if (e.key === '+' || e.key === '=') town.setSpeed(Math.min(0.6, town.speed * 1.5));
@@ -52,11 +56,7 @@ async function boot() {
     else if (e.key === 'ArrowDown') { e.preventDefault(); brain.selectNext(); }
   });
 
-  let last = performance.now();
-  function frame(now: number) {
-    const dtReal = Math.min(0.05, (now - last) / 1000); // clamp tab-switch jumps
-    last = now;
-
+  function tick(dtReal: number) {
     town.update(dtReal);
     const snap = town.snapshot();
     stage.update(snap, dtReal);
@@ -64,9 +64,21 @@ async function boot() {
     townPanel.update(snap);
     brain.update(snap, dtReal);
     city.update(snap, dtReal);
-
+    psyche.update(snap, dtReal);
+    memory.update(snap, dtReal);
     clockEl.textContent = fmtClock(snap.time);
     renderCaption(snap);
+  }
+
+  // debug/verification hook: drive the whole frame loop deterministically even
+  // when the tab is backgrounded (requestAnimationFrame is throttled while hidden).
+  (window as any).__dbg = { town, stage, brain, psyche, memory, tick };
+
+  let last = performance.now();
+  function frame(now: number) {
+    const dtReal = Math.min(0.05, (now - last) / 1000); // clamp tab-switch jumps
+    last = now;
+    tick(dtReal);
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);

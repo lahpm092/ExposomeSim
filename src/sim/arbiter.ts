@@ -85,6 +85,10 @@ function prepotencyWeights(needs: NeedsReadout): Record<NeedTier, number> {
 function primaryNeed(kind: IntentionKind, n: NeedsReadout): number {
   switch (kind) {
     case 'eat':       return n.hunger;
+    case 'buy_meal':  return n.hunger;                         // a prepared meal (work burger)
+    case 'drink':     return n.thirst;
+    case 'relieve':   return n.elimination;                   // steep near-full ⇒ overrides
+    case 'bathe':     return n.cleanliness;
     case 'rest':      return n.energy;
     case 'socialize': return n.belonging;
     case 'linger':    return Math.max(0.4 * n.belonging, n.novelty);
@@ -114,6 +118,10 @@ function circadianFit(kind: IntentionKind, clock: number): number {
     case 'linger':    f = bump(h, 16, 5); break;                       // afternoon/eve
     case 'shop':      f = bump(h, 15, 4); break;                       // daytime errand
     case 'go_home':   f = bump(h, 21, 4); break;                       // evening/night
+    case 'drink':     f = 0.5; break;                                  // thirst has no clock
+    case 'relieve':   f = 0.5; break;                                  // nor does the bladder
+    case 'bathe':     f = bump(h, 7, 1.6); break;                      // morning ritual
+    case 'buy_meal':  f = bump(h, 12.5, 1.5); break;                   // the lunch break
     case 'eat':       f = Math.max(bump(h, 8, 1.2), bump(h, 12.5, 1.5), bump(h, 19, 1.8)); break;
     default:          f = 0.3;
   }
@@ -150,7 +158,28 @@ function feasible(aff: Affordance, ctx: ArbiterContext): boolean {
   if (aff.needsFoodStock && ctx.resources.foodStock <= 0) return false; // can't eat empty
   if (aff.costMoney > 0 && ctx.resources.money < aff.costMoney) return false; // can't afford
   if (aff.kind === 'shop' && ctx.resources.foodStock > 8) return false;  // pantry already full
+  if (aff.kind === 'bathe' && ctx.needs.cleanliness < 0.12) return false; // already clean
+  if (aff.kind === 'relieve' && ctx.needs.elimination < 0.05) return false; // nothing to void
+  if (aff.kind === 'buy_meal' && ctx.needs.hunger < 0.35) return false; // not hungry enough
   return true;
+}
+
+// grocery pull: a low fridge recruits a proactive shopping run (people restock
+// before they are fully out), so the supermarket is a real, regular food source.
+function groceryPull(ctx: ArbiterContext): number {
+  const low = clamp(1 - ctx.resources.foodStock / 5, 0, 1);
+  return 0.55 * low;
+}
+
+// deep-night sleep gate: while she should be asleep at home, non-urgent errands are
+// suppressed and rest is pulled — so nights are for sleeping, mornings for the ritual.
+function nightGate(kind: IntentionKind, clock: number): number {
+  const h = ((clock % 24) + 24) % 24;
+  if (!(h >= 23 || h < 6)) return 0;
+  if (kind === 'rest') return 0.7;
+  if (kind === 'relieve') return 0;          // the bladder can still wake her
+  if (kind === 'drink') return -0.15;        // a sip is ok but not a priority
+  return -0.5;                               // everything else waits for morning
 }
 
 // ---- the score of one (affordance @ place) candidate ----------------------
@@ -168,6 +197,8 @@ function score(aff: Affordance, place: Place, ctx: ArbiterContext, w: Record<Nee
   if (aff.tier === ctx.needs.dominantTier) u += K_DOMINANT;     // agree with readout
   if (aff.kind === 'work') u += workUrgency(ctx);               // rent / poverty
   if (aff.kind === 'rest') u += restPull(ctx);                  // night + sleep debt
+  if (aff.kind === 'shop') u += groceryPull(ctx);              // empty fridge → restock
+  u += nightGate(aff.kind, ctx.clock);                         // sleep through the night
   u += (ctx.rng() - 0.5) * 2 * JITTER;                          // break exact ties
   return u;
 }
@@ -178,7 +209,11 @@ function reasonFor(kind: IntentionKind, place: PlaceId, ctx: ArbiterContext): st
   const n = ctx.needs;
   const at = `@ ${place}`;
   switch (kind) {
-    case 'eat':       return `hungry (${pct(n.hunger)}) -> eat ${at}`;
+    case 'eat':       return `hungry (${pct(n.hunger)}) -> cook & eat ${at}`;
+    case 'buy_meal':  return `hungry (${pct(n.hunger)}) -> grab a burger ${at}`;
+    case 'drink':     return `thirsty (${pct(n.thirst)}) -> drink ${at}`;
+    case 'relieve':   return `need the toilet (${pct(n.elimination)}) -> ${at}`;
+    case 'bathe':     return `feeling grimy (${pct(n.cleanliness)}) -> bathe ${at}`;
     case 'shop':
       return n.hunger > 0.4 && ctx.resources.foodStock <= 0
         ? `hungry, foodStock empty -> shop ${at}`

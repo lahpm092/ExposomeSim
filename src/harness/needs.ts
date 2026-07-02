@@ -10,7 +10,8 @@
 // normalized tone with baseline ~1 over [0,4]; activations/drives live in
 // [0,1]; dominance in [-1,1]; allostaticLoad in [0,50].
 // =============================================================================
-import type { SomaState, Resources, NeedsReadout, NeedsIntegrals, NeedTier } from '../types';
+import type { SomaState, Resources, NeedsReadout, NeedsIntegrals, NeedTier, Physiology } from '../types';
+import { eliminationUrgency } from './physiology';
 import { clamp, sigmoid } from '../util/num';
 
 // Deficit of a baseline-1 modulator: 0 at/above baseline, →1 as tone collapses.
@@ -26,14 +27,19 @@ const TIER_BASE: Record<NeedTier, number> = {
   physiological: 1.0, safety: 0.95, belonging: 0.9, esteem: 0.85, actualization: 0.8,
 };
 
-export function computeNeeds(soma: SomaState, resources: Resources): NeedsReadout {
+export function computeNeeds(soma: SomaState, resources: Resources, phys?: Physiology): NeedsReadout {
   // --- physiological -------------------------------------------------------
-  // hunger: high orexigenic tone (ghrelin) AND an empty larder. The pantry term
-  // dominates — you can be metabolically calm yet "hungry-as-a-need" with no food.
-  const hunger = clamp(
-    0.55 * sigmoid(1.5 * (soma.ghrelin - 1)) + 0.45 * (resources.foodStock <= 0 ? 1 : 0.2),
-    0, 1,
-  );
+  // hunger: the gut-energy reservoir is the CAUSE (satiety low ⇒ hungry). The
+  // ghrelin tone it drives is a secondary read; a small anticipatory term reflects
+  // an empty larder (nothing to cook), which recruits a grocery run before crisis.
+  const bodyHunger = phys ? clamp(1 - phys.satiety, 0, 1) : clamp(0.55 * sigmoid(1.5 * (soma.ghrelin - 1)) + 0.45 * (resources.foodStock <= 0 ? 1 : 0.2), 0, 1);
+  const hunger = clamp(bodyHunger * 0.8 + (resources.foodStock <= 0 && bodyHunger > 0.3 ? 0.25 : 0), 0, 1);
+  // thirst: the osmostat reads dehydration directly (physiology writes soma.thirst).
+  const thirst = clamp(soma.thirst, 0, 1);
+  // elimination: a steep urgency near a full bladder/bowel (overrides when pressing).
+  const elimination = phys ? eliminationUrgency(phys) : 0;
+  // cleanliness: hygiene decays with time; a bath restores it.
+  const cleanliness = phys ? clamp(1 - phys.hygiene, 0, 1) : 0;
   // sleep pressure as a slow scalar (debt of ~16h saturates the need).
   const sleepPressure = clamp(resources.sleepDebt / 16, 0, 1);
   // energy deficit: acute depletion (fatigue) lifted by accumulated sleep debt.
@@ -85,7 +91,9 @@ export function computeNeeds(soma: SomaState, resources: Resources): NeedsReadou
   const novelty = clamp(1 - clamp(soma.SEEKING + soma.PLAY, 0, 1), 0, 1);
 
   const deficit: Record<NeedTier, number> = {
-    physiological: Math.max(hunger, energy * 0.9, sleepPressure),
+    // elimination & thirst can seize the physiological tier outright when urgent;
+    // cleanliness is a softer physiological pull (weighted below the survival needs).
+    physiological: Math.max(hunger, thirst, elimination, energy * 0.9, sleepPressure, cleanliness * 0.6),
     safety,
     belonging,
     esteem,
@@ -105,17 +113,18 @@ export function computeNeeds(soma: SomaState, resources: Resources): NeedsReadou
     gate *= clamp(1 - 0.6 * deficit[tier], 0.25, 1); // SOFT gate: Maslow is a tendency, not a lock
   }
 
-  return { hunger, energy, safety, belonging, esteem, novelty, deficit, dominantTier };
+  return { hunger, thirst, energy, elimination, cleanliness, safety, belonging, esteem, novelty, deficit, dominantTier };
 }
 
 export function emptyNeedIntegrals(): NeedsIntegrals {
-  return { minutesHungry: 0, minutesLonely: 0, minutesDepleted: 0, minutesUnsafe: 0 };
+  return { minutesHungry: 0, minutesThirsty: 0, minutesLonely: 0, minutesDepleted: 0, minutesUnsafe: 0 };
 }
 
 /** ∫ over deficit membership: accrue minutes whenever a need is genuinely unmet (>0.5). */
 export function updateNeedIntegrals(m: NeedsIntegrals, n: NeedsReadout, dtHours: number): void {
   const min = dtHours * 60;
   if (n.hunger > 0.5) m.minutesHungry += min;
+  if (n.thirst > 0.5) m.minutesThirsty += min;
   if (n.belonging > 0.5) m.minutesLonely += min;
   if (n.energy > 0.5) m.minutesDepleted += min;
   if (n.safety > 0.5) m.minutesUnsafe += min;
@@ -136,6 +145,11 @@ export function applyNeedFeedback(soma: SomaState, n: NeedsReadout, dtHours: num
   const ghrelinHead = (4 - soma.ghrelin) / 4;
   soma.ghrelin = clamp(soma.ghrelin + n.hunger * 0.5 * dt * Math.max(0, ghrelinHead), 0, 4);
   soma.SEEKING = clamp(soma.SEEKING + n.hunger * 0.15 * dt * (1 - soma.SEEKING), 0, 1);
+
+  // thirst + hunger jointly light the HYPOTHALAMUS — the homeostatic detector hub.
+  // (ghrelin already drives it via the coupling graph; thirst adds an osmostat term.)
+  soma.hypothalamus = clamp(soma.hypothalamus + (0.6 * n.thirst + 0.3 * n.hunger) * dt * (1 - soma.hypothalamus), 0, 1);
+  soma.SEEKING = clamp(soma.SEEKING + n.thirst * 0.12 * dt * (1 - soma.SEEKING), 0, 1);
 
   // belonging → separation distress (PANIC/GRIEF) builds when contact is missing.
   soma.PANIC_GRIEF = clamp(soma.PANIC_GRIEF + n.belonging * 0.45 * dt * (1 - soma.PANIC_GRIEF), 0, 1);

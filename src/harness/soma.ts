@@ -38,6 +38,7 @@ export function createSoma(params: SomaParams, startHour = 8): SomaState {
   }
   // experiential / dispositional initial conditions
   s.fatigue = 0.2;
+  s.thirst = 0.15;           // hypothalamic osmostat starts mildly dry
   s.da_meso = 0.85 + 0.15 * params.d2Density; // muted tonic reward if low D2
   s.allostaticLoad = clamp(params.amygdalaGain - 1, 0, 3) * 0.6; // chronic-load head start
   s.valence = 0; s.arousal = 0.45; s.dominance = 0;

@@ -10,7 +10,9 @@ const PLACE_LABEL: Record<string, string> = {
   home: 'Apartment', work: 'The Counter', market: 'Market', thirdplace: 'Café', park: 'Park',
 };
 const NEED_ROWS: { key: keyof NeedsReadout; label: string }[] = [
-  { key: 'hunger', label: 'hunger' }, { key: 'energy', label: 'depletion' },
+  { key: 'hunger', label: 'hunger' }, { key: 'thirst', label: 'thirst' },
+  { key: 'elimination', label: 'bladder' }, { key: 'cleanliness', label: 'grime' },
+  { key: 'energy', label: 'depletion' },
   { key: 'safety', label: 'unsafety' }, { key: 'belonging', label: 'loneliness' },
   { key: 'esteem', label: 'esteem-gap' }, { key: 'novelty', label: 'novelty-gap' },
 ];
