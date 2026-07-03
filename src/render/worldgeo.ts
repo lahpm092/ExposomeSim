@@ -17,24 +17,12 @@ import * as THREE from 'three';
 import type { PlaceId, Vec2, IntentionKind } from '../types';
 import { PLACES } from '../sim/places';
 import { PALETTE, lineMaterial } from './palette';
-import { makeKit, type Kit } from './kit';
-import { buildApartment, type Apartment, type FurnitureFn } from './apartment';
-import { FURNITURE as AGENT } from './furnitureModels';
-import { FURNITURE as BASE } from './furniture';
+import { buildBuilding, type Building } from './building';
 
-// agent-authored models first, my hand-built placeholders as the safety net.
-const tryOr = (a: FurnitureFn, b: FurnitureFn): FurnitureFn => (kit: Kit) => {
-  try { const g = a(kit); if (g && (g as any).isObject3D) return g; } catch { /* fall back */ }
-  return b(kit);
-};
-const FURNITURE = {
-  kitchen: tryOr(AGENT.kitchen, BASE.kitchen), bathroom: tryOr(AGENT.bathroom, BASE.bathroom),
-  bed: tryOr(AGENT.bed, BASE.bed), living: tryOr(AGENT.living, BASE.living),
-};
-
-/** the "shrink on entering" scale: the apartment complex is modelled at real
- *  metres, then drawn at 1/8 so it fits the tower and Mara shrinks to match. */
-export const INT_SCALE = 1 / 8;
+/** the "shrink on entering" scale: the apartment building is modelled at real
+ *  metres, then drawn at 1/4 so it fits the tower and residents shrink to match.
+ *  Each apartment inside is shrunk 1/4 AGAIN (→ 1/16) — the double projection. */
+export const INT_SCALE = 1 / 4;
 
 export const CITY = 66;            // metres across the town plane
 export const GROUND_Y = 0;
@@ -122,8 +110,8 @@ export interface Locale {
   floorY: number;          // Y of the interior floor (home = top storey)
   occupant: Spot;          // default stand-spot inside
   spots: Partial<Record<IntentionKind, Spot>>; // where she stands to do a given act
-  apartment?: Apartment;   // home: the 1/8 complex (stairs/hallway/studio + doors + path)
-  intScale: number;        // interior draw-scale (1, or 1/8 for the home complex)
+  building?: Building;      // home: the 1/4 apartment building (lobby/stairs/hallways/flats)
+  intScale: number;        // interior draw-scale (1, or 1/4 for the home building)
 }
 
 /** angle so local +z points from the building toward town centre */
@@ -147,21 +135,24 @@ export function buildLocale(id: PlaceId, mats: CityMats): Locale {
   let floorY = 0;
   let occupant: Spot = { x: 0, z: 0 };
   let spots: Partial<Record<IntentionKind, Spot>> = {};
-  let apartment: Apartment | undefined;
+  let building: Building | undefined;
   let intScale = 1;
 
   switch (id) {
     case 'home': {
-      // exterior tower massing (base storeys + top) — hidden when she's inside
+      // exterior tower massing (base storeys + top) — hidden when focused inside
       apartmentBase(base, mats); apartmentTop(shell, mats);
-      // the detailed COMPLEX (lobby → dogleg stairs → hallway → studio), modelled
-      // at real metres then shrunk to 1/8 and stood just in front of the tower.
-      apartment = buildApartment(makeKit(mats), FURNITURE);
-      apartment.group.scale.setScalar(INT_SCALE);
-      apartment.group.position.set(0, 0, 4.6);
-      interior.add(apartment.group);
+      // the detailed BUILDING (lobby → dogleg stairs → hallways → 10+ flats),
+      // modelled at real metres then shrunk to 1/4 and stood at the tower front so
+      // its main door lands on the tower stoop; each flat is shrunk 1/4 again.
+      building = buildBuilding(mats);
+      building.group.scale.setScalar(INT_SCALE);
+      // Keep the main-door plane (building-local z = FRONT_Z = 6.7) on the tower
+      // stoop / approach (locale z ≈ 3.0) at the new scale: 3.0 − 6.7·INT_SCALE.
+      building.group.position.set(0.06, 0, 3.0 - 6.7 * INT_SCALE);
+      interior.add(building.group);
       intScale = INT_SCALE;
-      occupant = { x: 0.4, z: -1.6, yaw: 0 };  // studio centre (real m, interior-local)
+      occupant = { x: 0, z: 0, yaw: 0 };
       break;
     }
     case 'work':
@@ -186,7 +177,7 @@ export function buildLocale(id: PlaceId, mats: CityMats): Locale {
       break;
   }
   group.updateMatrixWorld(true); // static: freeze world matrices for localToWorld()
-  return { id, group, base, shell, interior, world, yaw, floorY, occupant, spots, apartment, intScale };
+  return { id, group, base, shell, interior, world, yaw, floorY, occupant, spots, building, intScale };
 }
 
 // ---- interior helpers ------------------------------------------------------

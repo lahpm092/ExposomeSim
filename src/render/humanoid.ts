@@ -21,6 +21,10 @@
 import * as THREE from 'three';
 import type { SomaState, EmotionReadout, Demeanor, Customer } from '../types';
 import { C, PALETTE, clampNum } from './palette';
+import {
+  POSES, DOOR_REACH, STAIR_FRAMES, STAIR_SECONDS, samplePose, blendFrame, triWave,
+  type PoseFrame, type ActivityKind,
+} from './poses';
 
 export type FigureRole = 'protagonist' | 'partner' | 'npc';
 
@@ -37,6 +41,7 @@ const NECK = 0.10;
 const HEAD_R = 0.13;
 
 const BASE_OPACITY = 0.9;
+const EMPTY_FRAME: PoseFrame = {};
 
 /** spring-smoothed scalar chasing a target each tick. */
 class Smooth {
@@ -101,6 +106,8 @@ export class Humanoid {
   private fill: THREE.MeshBasicMaterial;
   private ink: THREE.LineBasicMaterial;
   private headFill?: THREE.MeshBasicMaterial; // protagonist: a red head (a clear marker)
+  private hatFill: THREE.MeshBasicMaterial;   // a coloured cap — the per-agent identity marker
+  private readonly hat = new THREE.Group();
 
   // smoothed articulation
   private leanX = new Smooth(0);
@@ -120,11 +127,26 @@ export class Humanoid {
 
   private clock = Math.random() * 10;
   private speed = 0;         // world units/s, measured from motion
-  private scaleTarget = 1;   // 1 outside, 1/8 inside the shrunk apartment
+  private scaleTarget = 1;   // 1 outside, 1/4 inside the building, 1/16 inside a flat
   private scaleV = new Smooth(1);
+
+  // activity pose layer (sleep / couch / toilet / shower / door / stairs)
+  private activity: ActivityKind = 'stand';
+  private poseClock = 0;
+  private poseW = new Smooth(0);       // 0 = gait/embody drives, 1 = activity pose drives
+  private phone?: THREE.Group;         // the phone prop (spawned lazily)
 
   /** target body scale (smoothly approached) — the "shrink on entering" trick. */
   setScale(s: number): void { this.scaleTarget = s; }
+
+  /** paint (and reveal) the identity hat in a distinct colour. */
+  setHat(color: number): void { this.hatFill.color.setHex(color); this.hat.visible = true; }
+
+  /** set the current whole-body activity; pose blends in/out smoothly. */
+  setActivity(a: ActivityKind): void {
+    if (a !== this.activity) { this.activity = a; if (a !== 'stairs' && a !== 'door') this.poseClock = 0; }
+  }
+  get currentActivity(): ActivityKind { return this.activity; }
 
   constructor(role: FigureRole) {
     this.role = role;
@@ -133,6 +155,10 @@ export class Humanoid {
       polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
     });
     this.ink = new THREE.LineBasicMaterial({ color: PALETTE.ink, transparent: true, opacity: BASE_OPACITY });
+    this.hatFill = new THREE.MeshBasicMaterial({
+      color: PALETTE.paper, side: THREE.FrontSide,
+      polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
+    });
     if (role === 'protagonist') {
       this.headFill = new THREE.MeshBasicMaterial({
         color: 0xb23020, side: THREE.FrontSide,   // a clear red head, so Mara reads at a glance
@@ -200,6 +226,24 @@ export class Humanoid {
       [0, HEAD_R * 0.7, HEAD_R * 0.7, 0, HEAD_R * 0.62, HEAD_R + 0.1], 3));
     this.head.add(new THREE.Line(gaze, E));
 
+    // --- hat: a coloured low-poly cap sitting on the crown. It is the primary
+    //     way to tell the ten agents apart (and whose view you're inspecting).
+    //     Hidden until setHat() paints it. Parented to the head so it inherits
+    //     the body scale and nods with the head.
+    const HF = this.hatFill;
+    const band = new THREE.CylinderGeometry(HEAD_R * 1.03, HEAD_R * 1.08, HEAD_R * 0.52, 8);
+    band.translate(0, HEAD_R * 0.7 + HEAD_R * 0.6, 0);
+    const dome = new THREE.IcosahedronGeometry(HEAD_R * 1.03, 0);
+    dome.scale(1, 0.6, 1);
+    dome.translate(0, HEAD_R * 0.7 + HEAD_R * 0.9, 0);
+    const brim = new THREE.BoxGeometry(HEAD_R * 1.5, 0.012, HEAD_R * 0.8);
+    brim.translate(0, HEAD_R * 0.7 + HEAD_R * 0.5, HEAD_R * 0.95);
+    for (const geo of [band, dome, brim]) {
+      this.hat.add(new THREE.Mesh(geo, HF), new THREE.LineSegments(new THREE.EdgesGeometry(geo, 1), E));
+    }
+    this.hat.visible = false;
+    this.head.add(this.hat);
+
     // --- arms ---------------------------------------------------------------
     this.shL.position.set(SH_HALF, SHOULDER_Y - 0.03, 0);
     this.shR.position.set(-SH_HALF, SHOULDER_Y - 0.03, 0);
@@ -210,6 +254,27 @@ export class Humanoid {
     this.shL.add(this.elL); this.shR.add(this.elR);
     this.elL.add(limbBox(0.085, FORE_ARM, 0.095, F, E, 0.8));
     this.elR.add(limbBox(0.085, FORE_ARM, 0.095, F, E, 0.8));
+
+    // phone prop: a small slab held in front of the face during couch_phone.
+    const phone = new THREE.Group();
+    const pgeo = new THREE.BoxGeometry(0.085, 0.16, 0.012);
+    phone.add(new THREE.Mesh(pgeo, F), new THREE.LineSegments(new THREE.EdgesGeometry(pgeo, 1), E));
+    phone.add(new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(0.06, 0.11, 0.014), 1),
+      new THREE.LineBasicMaterial({ color: PALETTE.ink, transparent: true, opacity: 0.35 }))); // screen
+    phone.position.set(0, SHOULDER_Y + 0.10, 0.30); phone.rotation.x = -0.7;
+    phone.visible = false;
+    this.torso.add(phone);
+    this.phone = phone;
+  }
+
+  /** the pose-frame the active activity wants this instant (empty when standing). */
+  private poseFrame(): { pf: PoseFrame; phone: boolean } {
+    const a = this.activity;
+    if (a === 'stand' || a === 'walk') return { pf: EMPTY_FRAME, phone: false };
+    if (a === 'door') return { pf: DOOR_REACH, phone: false };
+    if (a === 'stairs') return { pf: blendFrame(STAIR_FRAMES[0], STAIR_FRAMES[1], triWave(this.poseClock / STAIR_SECONDS)), phone: false };
+    const pose = POSES[a];
+    return { pf: samplePose(pose, this.poseClock), phone: pose.prop === 'phone' };
   }
 
   // ---------------------------------------------------------------------------
@@ -282,7 +347,7 @@ export class Humanoid {
     const kc = 1 - Math.exp(-3 * dt);
 
     // body scale (smooth shrink/grow); gait is measured in BODY units so the walk
-    // cadence stays natural whether she's full-size outside or 1/8 inside.
+    // cadence stays natural whether she's full-size outside or 1/4 inside.
     const sc = this.scaleV.toward(this.scaleTarget, 1 - Math.exp(-5 * dt));
     this.object.scale.setScalar(sc);
 
@@ -324,37 +389,53 @@ export class Humanoid {
     // colour
     this.ink.color.lerp(this.dColor, kc);
 
-    // breath + tremor oscillators
-    const breath = Math.sin(this.clock * 2.2) * bAmp;
-    const trX = tr * (Math.sin(this.clock * 33) + 0.5 * Math.sin(this.clock * 51));
+    // ---- activity pose blend (sleep / couch / toilet / shower / door / stairs) ----
+    this.poseClock += dt;
+    const poseActive = this.activity !== 'stand' && this.activity !== 'walk';
+    const pw = this.poseW.toward(poseActive ? 1 : 0, 1 - Math.exp(-6 * dt));
+    const { pf, phone } = this.poseFrame();
+    const P = (key: keyof PoseFrame) => (pf[key] ?? 0) * pw;                       // pose-only channel
+    const mix = (gaitV: number, key: keyof PoseFrame) => gaitV * (1 - pw) + (pf[key] ?? 0) * pw;
+    if (this.phone) this.phone.visible = phone && pw > 0.5;
 
-    // write root
-    this.object.position.set(this.pos.x + trX, this.pos.y, this.pos.z);
+    // breath + tremor oscillators (both quiet while a pose is held)
+    const breath = Math.sin(this.clock * 2.2) * bAmp * (1 - 0.6 * pw);
+    const trX = tr * (Math.sin(this.clock * 33) + 0.5 * Math.sin(this.clock * 51)) * (1 - pw);
+
+    // write root (+ pose root offsets, in body metres, scaled, along facing)
+    const fwd = P('rootForward'), dy = P('rootDY');
+    this.object.position.set(
+      this.pos.x + trX + fwd * sc * Math.sin(this.yaw),
+      this.pos.y + dy * sc,
+      this.pos.z + fwd * sc * Math.cos(this.yaw),
+    );
     this.object.rotation.y = this.yaw;
 
-    // hips bob with gait/breath
-    this.hips.position.y = HIP_Y + breath + gAmp * 0.02 * Math.abs(Math.sin(this.gait * 2));
+    // whole-body tilt (lying) + hip bob
+    this.hips.rotation.x = P('bodyTiltX');
+    this.hips.position.y = HIP_Y + breath + gAmp * 0.02 * Math.abs(Math.sin(this.gait * 2)) * (1 - pw);
 
     // torso lean + hunch
-    this.torso.rotation.x = lean + hunch * 0.2;
+    this.torso.rotation.x = mix(lean + hunch * 0.2, 'torsoX');
+    this.torso.rotation.z = P('torsoZ');
 
     // legs: swing at hip, bend at knee on the lifting phase
-    this.hipL.rotation.x = swing;
-    this.hipR.rotation.x = swing2;
-    this.kneeL.rotation.x = lift * 1.1;
-    this.kneeR.rotation.x = lift2 * 1.1;
+    this.hipL.rotation.x = mix(swing, 'hipLX');
+    this.hipR.rotation.x = mix(swing2, 'hipRX');
+    this.kneeL.rotation.x = mix(lift * 1.1, 'kneeLX');
+    this.kneeR.rotation.x = mix(lift2 * 1.1, 'kneeRX');
 
     // arms: counter-swing to the legs; hunch draws them inward
-    this.shL.rotation.x = swing2 * 0.8 - hunch * 0.5;
-    this.shR.rotation.x = swing * 0.8 - hunch * 0.5;
-    this.shL.rotation.z = 0.06 + hunch * 0.35;
-    this.shR.rotation.z = -0.06 - hunch * 0.35;
-    this.elL.rotation.x = -0.15 - Math.abs(swing2) * 0.4;
-    this.elR.rotation.x = -0.15 - Math.abs(swing) * 0.4;
+    this.shL.rotation.x = mix(swing2 * 0.8 - hunch * 0.5, 'shLX');
+    this.shR.rotation.x = mix(swing * 0.8 - hunch * 0.5, 'shRX');
+    this.shL.rotation.z = mix(0.06 + hunch * 0.35, 'shLZ');
+    this.shR.rotation.z = mix(-0.06 - hunch * 0.35, 'shRZ');
+    this.elL.rotation.x = mix(-0.15 - Math.abs(swing2) * 0.4, 'elLX');
+    this.elR.rotation.x = mix(-0.15 - Math.abs(swing) * 0.4, 'elRX');
 
     // head
-    this.head.rotation.x = hx + tr * 1.1 * Math.sin(this.clock * 40);
-    this.head.rotation.z = hz;
+    this.head.rotation.x = mix(hx + tr * 1.1 * Math.sin(this.clock * 40), 'headX');
+    this.head.rotation.z = mix(hz, 'headZ');
 
     // fade (leaving figures)
     this.ink.opacity = BASE_OPACITY * fade;
@@ -371,5 +452,6 @@ export class Humanoid {
     this.fill.dispose();
     this.ink.dispose();
     this.headFill?.dispose();
+    this.hatFill.dispose();
   }
 }

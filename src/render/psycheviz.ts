@@ -68,7 +68,8 @@ export class PsychePanel {
 
   update(snap: TownSnapshot, dtReal: number): void {
     if (this.hidden) return;
-    const soma = snap?.cashier?.soma;
+    const focusAgent = snap?.agents?.[snap.focus ?? 0];
+    const soma = focusAgent?.soma ?? snap?.cashier?.soma;
     if (!soma) return;
     this.clock += Number.isFinite(dtReal) ? dtReal : 0;
     const k = 1 - Math.exp(-6 * (dtReal || 0.016));

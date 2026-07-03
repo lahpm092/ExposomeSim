@@ -16,9 +16,20 @@ import { deriveParams } from './params';
 import { createSoma, integrate, computeCoreAffect } from './soma';
 import { fastAppraise, applyAppraisal, applyRegulation } from './appraisal';
 import { readEmotion, emptyIntegrals, updateIntegrals } from './emotion';
-import { MemoryGraph } from './memgraph';
+import { MemoryGraph, type MemGraphJSON } from './memgraph';
 import { createPhysiology, stepPhysiology, ingestFood, ingestWater, voidBladder, voidBowel, bathe } from './physiology';
 import { clamp, mulberry32, type RNG } from '../util/num';
+
+/** the serialized dynamical state of a Character (identity/params are rebuilt). */
+export interface CharacterJSON {
+  soma: SomaState;
+  phys: Physiology;
+  integrals: EmotionIntegrals;
+  lastResponse?: LLMResponse;
+  rng: number;
+  consolidateCooldown: number;
+  memory: MemGraphJSON;
+}
 
 export interface CharacterOpts { seed?: number; startHour?: number; }
 
@@ -110,6 +121,29 @@ export class Character {
       memoryGraph: this.memory.view(),
       physiology: { ...this.phys },
     };
+  }
+
+  // ---- persistence: capture / overwrite the dynamical state in place ---------
+  toJSON(): CharacterJSON {
+    return {
+      soma: { ...this.soma },
+      phys: { ...this.phys },
+      integrals: { ...this.integrals },
+      lastResponse: this.lastResponse,
+      rng: this.rng.save ? this.rng.save() : 0,
+      consolidateCooldown: this.consolidateCooldown,
+      memory: this.memory.toJSON(),
+    };
+  }
+
+  loadJSON(j: CharacterJSON): void {
+    Object.assign(this.soma, j.soma);
+    Object.assign(this.phys, j.phys);
+    this.integrals = { ...j.integrals };
+    this.lastResponse = j.lastResponse;
+    if (this.rng.load) this.rng.load(j.rng);
+    this.consolidateCooldown = j.consolidateCooldown;
+    this.memory.loadJSON(j.memory);
   }
 }
 

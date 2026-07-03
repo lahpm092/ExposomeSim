@@ -10,6 +10,10 @@ import { weightedPick, type RNG } from '../util/num';
 let _seq = 0;
 const uid = (p: string) => `${p}${(_seq++).toString(36)}`;
 
+/** module id-counter accessors (for save/load reconciliation). */
+export function getEventSeq(): number { return _seq; }
+export function setEventSeq(n: number): void { _seq = n; }
+
 const NAMES = ['a man in a hard hat', 'a teenage girl', 'an older woman', 'a courier', 'two students',
   'a businessman', 'a tired nurse', 'a dad with a toddler', 'a regular', 'a tourist'];
 const ORDERS = ['a double cheeseburger and fries', 'a veggie wrap and a shake', 'two kids meals',

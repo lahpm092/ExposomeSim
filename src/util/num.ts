@@ -7,18 +7,23 @@ export const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
 /** map an unbounded score to [-1,1] */
 export const squash = (x: number) => Math.tanh(x);
 
-/** mulberry32 — tiny deterministic PRNG */
-export function mulberry32(seed: number) {
+/** mulberry32 — tiny deterministic PRNG. Resumable: the returned function carries
+ *  .save()/.load(v) so its single uint32 cursor can be captured and restored, which
+ *  is what makes the whole substrate byte-identical after a save/load. */
+export function mulberry32(seed: number): RNG {
   let a = seed >>> 0;
-  return function () {
+  const fn = function () {
     a |= 0; a = (a + 0x6d2b79f5) | 0;
     let t = Math.imul(a ^ (a >>> 15), 1 | a);
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+  } as RNG;
+  fn.save = () => a >>> 0;
+  fn.load = (v: number) => { a = v >>> 0; };
+  return fn;
 }
 
-export interface RNG { (): number; }
+export interface RNG { (): number; save?(): number; load?(v: number): void; }
 
 /** standard-normal sample from a uniform RNG (Box–Muller) */
 export function randn(rng: RNG): number {

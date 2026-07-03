@@ -17,7 +17,7 @@ import type {
   NpcLite, Relationship, Ledger, DensityField, TownSnapshot, SomaState,
 } from '../types';
 import { Character } from '../harness/character';
-import { MindLite } from '../harness/mindlite';
+import { MindLite, type MindLiteJSON } from '../harness/mindlite';
 import { computeCoreAffect } from '../harness/soma';
 import { CASHIER_PROFILE, sampleProfile } from '../harness/params';
 import { computeNeeds, applyNeedFeedback, emptyNeedIntegrals, updateNeedIntegrals } from '../harness/needs';
@@ -32,6 +32,11 @@ import { createDensity, stepDensity, expectedAt } from './city';
 import { makeNpcLite, stepNpcLite, npcName, type LiteCtx } from './npc';
 import { buildMessages, parseResponse, fallbackResponse, LLM_RESPONSE_SCHEMA } from '../llm/prompt';
 import { makeCustomer, buildAgenda, IDLE_EVENT } from './events';
+import { Society, type MaraMacro } from './society';
+import { ROSTER } from '../harness/roster';
+import type { AgentPublic, AgentPlace, WorkMode, PhoneState, WorkPsych } from '../types';
+import { createPhoneState, stepPhone, type PhoneCtx } from '../harness/phone';
+import { sleepPropensity, sleepDriveOf, type SleepCtx } from '../harness/sleep';
 import { mulberry32, clamp, lerp, type RNG } from '../util/num';
 
 // locale geometry — interior-room frame (centred on the building; +z toward the
@@ -62,11 +67,18 @@ export class Town {
   readonly mara: Character;
   /** full-resolution protagonists (Mara is [0]; a second can be added at runtime). */
   readonly protagonists: Character[] = [];
+  /** the other nine full minds + the emergent conversations between them. */
+  readonly society: Society;
+  /** which of the ten agents the inspector panels track (0 = Mara). */
+  focusIndex = 0;
   llm: LLMClient | null;
   /** off-hot-path reasoner for memory consolidation/reflection (falls back to llm). */
   consolidator: LLMClient | null;
   speed: number;
   paused = false;
+  /** bumped on every load/branch/jump so a stale in-flight LLM promise no-ops
+   *  instead of writing appraisal+memory into freshly-restored state. */
+  epoch = 0;
 
   resources: Resources;
   ledger: Ledger = new Map();
@@ -90,6 +102,7 @@ export class Town {
 
   private lastSocialAt: number;
   private socialFuel = 0.55; // slow belonging reservoir: drains alone, refills on contact
+  readonly maraPhone: PhoneState = createPhoneState(); // Mara's phone / social-media pull
   private rng: RNG;
   // beatInterval is in sim-hours. With a *thinking* driver (~10s/beat) the pendingLLM
   // guard already prevents pile-up; this sets the deliberate spacing between thoughts.
@@ -127,9 +140,14 @@ export class Town {
       phase: 'execute', startedAt: this.clock, plannedEnd: this.clock + 0.6,
     };
     this.enterLocale('home');
+    // the other nine minds: each a full Character with its own soma + memory graph,
+    // seeded with its interests, living its role-driven day and free to strike up
+    // emergent conversations. Mara ([0]) is stepped here; the Society steps 1..9.
+    this.society = new Society(this.mara, { seed: opts.seed ?? 7, startHour: opts.startHour ?? 7.5 });
   }
 
   get clock(): number { return this.mara.soma.t; }
+  setFocus(i: number): void { this.focusIndex = clamp(Math.round(i), 0, ROSTER.length - 1); }
   get day(): number { return Math.floor(this.clock / 24); }
   get weekend(): boolean { const d = this.day % 7; return d === 5 || d === 6; }
 
@@ -157,6 +175,10 @@ export class Town {
     applyNeedFeedback(this.mara.soma, this.needs, dt);
     updateNeedIntegrals(this.needsIntegrals, this.needs, dt);
 
+    // Mara's phone is always in reach — the same emergent pull to check it the
+    // whole roster has. She has no WorkPsych, so read a lightweight boredom proxy.
+    this.stepMaraPhone(dt);
+
     // 3) economy + city (cheap, statistical)
     if (this.place === 'work' && !this.travelling) tickWork(this.resources, dt);
     if (dueRent(this.resources, this.clock)) payRent(this.resources, this.clock);
@@ -180,6 +202,60 @@ export class Town {
       }
       this.stepFigures(dt);
     }
+
+    // 6) the other nine minds: step their somas, run their role behaviour, and
+    //    let conversations emerge between them. Mara's macro state is projected in
+    //    so she reads uniformly alongside them for the renderer + inspector.
+    this.society.setMaraMacro(this.maraMacro());
+    this.society.step(dt, { clock: this.clock, weekday: !this.weekend, rng: this.rng });
+    // being heard online eases the loneliness reservoir (belonging → a felt purpose).
+    this.socialFuel = clamp(this.socialFuel + this.society.takeMaraBelonging() * 0.6, 0, 1);
+  }
+
+  /** the lightweight boredom/stimulation proxy Mara's phone loop reads (she has no
+   *  WorkPsych), then the phone step itself. Anywhere, any time. */
+  private stepMaraPhone(dt: number): void {
+    const s = this.mara.soma;
+    const restIntent = this.goal.intention.kind === 'rest' || this.goal.intention.kind === 'linger';
+    const wpLite: Pick<WorkPsych, 'boredom' | 'stimulation' | 'workAnxiety'> = {
+      boredom: clamp(0.5 * clamp(1 - s.da_meso, 0, 1) + 0.4 * clamp(0.5 - s.arousal, 0, 0.5) * 2 + (restIntent ? 0.3 : 0), 0, 1),
+      stimulation: clamp(0.4 * s.arousal + 0.3 * clamp(s.SEEKING, 0, 1), 0, 1),
+      workAnxiety: clamp(s.cortisol - 1, 0, 1),
+    };
+    const hour = ((this.clock % 24) + 24) % 24;
+    const ctx: PhoneCtx = {
+      engaged: this.partnerMind ? 1 : 0,
+      watched: this.place === 'work' ? 0.5 : 0,
+      demand: this.place === 'work' ? 0.3 : 0.05,
+      needPull: clamp(this.needs.elimination * 0.6 + this.needs.hunger * 0.3, 0, 1),
+      night: hour >= 23 || hour < 6.5,
+      extraversion: clamp(0.5 + 0.2 * this.mara.profile.bigFive.E, 0, 1),
+      dtHours: dt,
+    };
+    stepPhone(this.maraPhone, wpLite, s, this.mara.params, ctx, this.rng);
+  }
+
+  /** Mara's macro placement, mapped into the uniform agent frame. */
+  private maraMacro(): MaraMacro {
+    let place: AgentPlace; let mode: WorkMode; let activity: string;
+    if (this.travelling) { place = 'commuting'; mode = 'commuting'; activity = 'walk'; }
+    else if (this.place === 'home') { place = 'home'; mode = 'home'; activity = this.maraHomeActivity(); }
+    else if (this.place === 'work') { place = 'foodcourt'; mode = 'cashiering'; activity = 'stand'; }
+    else { place = 'commuting'; mode = 'idle'; activity = 'stand'; }
+    return { place, mode, activity, station: 0, commuteT: this.travelling ? this.travelT : 0, needs: this.needs, onPhone: this.maraPhone.onPhone };
+  }
+
+  /** Mara's home pose: phone-scrolling wins (it delays sleep), then emergent sleep
+   *  when the arbiter is resting and the sleep gate is high, else the need-driven pose. */
+  private maraHomeActivity(): string {
+    const kind = this.goal.intention.kind;
+    if (this.maraPhone.onPhone) return 'couch_phone';
+    const restIntent = kind === 'rest' || kind === 'linger';
+    if (restIntent) {
+      const ctx: SleepCtx = { phone: 0, talking: false, workWindowOpen: false };
+      if (kind === 'rest' || sleepPropensity(this.mara.soma, ctx) > 0.55) return 'sleep';
+    }
+    return homePoseFor(kind);
   }
 
   // ===================== macro agency ===================================
@@ -545,12 +621,14 @@ export class Town {
   }
 
   private async driveLLM(e: WorldEvent): Promise<void> {
+    const myEpoch = this.epoch;
     const soma = this.mara.soma, readout = this.mara.readout();
     const mems = this.mara.recall(e.description, 3);
     const messages = buildMessages(this.mara.profile, soma, readout, mems, e);
     let resp: LLMResponse;
     try { resp = parseResponse(await this.llm!.complete(messages, { format: LLM_RESPONSE_SCHEMA, temperature: 0.7 }), soma, readout); }
     catch { resp = fallbackResponse(soma, readout, e); }
+    if (myEpoch !== this.epoch) return;   // state was loaded/branched while we awaited
     this.mara.applyDriverResponse(e, resp);
   }
 
@@ -570,12 +648,14 @@ export class Town {
   }
 
   private async driveShop(e: WorldEvent): Promise<void> {
+    const myEpoch = this.epoch;
     const soma = this.mara.soma, readout = this.mara.readout();
     const mems = this.mara.recall('food buy market cook eat groceries rice eggs vegetables', 4);
     const messages = buildMessages(this.mara.profile, soma, readout, mems, e);
     let resp: LLMResponse;
     try { resp = parseResponse(await this.llm!.complete(messages, { format: LLM_RESPONSE_SCHEMA, temperature: 0.8 }), soma, readout); }
     catch { resp = fallbackResponse(soma, readout, e); }
+    if (myEpoch !== this.epoch) return;   // state was loaded/branched while we awaited
     this.mara.applyDriverResponse(e, resp);
     this.stockFromThought(`${resp.speech} ${resp.innerMonologue ?? ''}`);
   }
@@ -591,6 +671,23 @@ export class Town {
     const queue: Customer[] = [];
     if (this.workCurrent) queue.push(this.workCurrent);
     queue.push(...this.workQueue);
+
+    // Mara projected into the uniform agent frame, then the whole roster. She carries
+    // her own phone/sleep readouts (Society passes idx 0 through unchanged).
+    const mm = this.maraMacro();
+    const s = this.mara.soma;
+    const maraPublic: AgentPublic = {
+      ...cashier,
+      id: ROSTER[0].profile.id, role: ROSTER[0].role, hatColor: ROSTER[0].hatColor,
+      interests: ROSTER[0].interests, place: mm.place, mode: mm.mode, activity: mm.activity,
+      homeIndex: ROSTER[0].homeIndex, station: mm.station, commuteT: mm.commuteT,
+      onPhone: this.maraPhone.onPhone, phoneHabit: this.maraPhone.habit,
+      phoneCraving: this.maraPhone.craving, phoneSessions: this.maraPhone.sessionsToday,
+      asleep: mm.activity === 'sleep',
+      sleepDrive: sleepDriveOf(s, { phone: this.maraPhone.onPhone ? 1 : 0, talking: false, workWindowOpen: this.place === 'work' }, mm.activity === 'sleep'),
+    };
+    const agents = this.society.publicViews(maraPublic);
+
     return {
       time: this.clock, speed: this.speed, queue, servedCount: this.servedCount,
       cashier, currentEvent: this.currentEvent,
@@ -601,7 +698,97 @@ export class Town {
       relationships: [...this.ledger.values()].sort((a, b) => b.familiarity - a.familiarity),
       partner: this.partnerMind?.view(),
       protagonists: this.protagonists.map((p) => p.profile.name),
+      agents, focus: this.focusIndex,
+      feed: this.society.feedView(),
+      company: this.society.companySnapshot(),
     };
+  }
+
+  // ===================== persistence ====================================
+  toJSON(): TownJSON {
+    const d = this.density;
+    return {
+      rng: this.rng.save ? this.rng.save() : 0,
+      resources: { ...this.resources, pantry: [...this.resources.pantry] },
+      ledger: [...this.ledger.entries()],
+      density: { cols: d.cols, rows: d.rows, cell: Array.from(d.cell), t: d.t, placeCell: { ...d.placeCell } },
+      needs: this.needs, needsIntegrals: this.needsIntegrals,
+      place: this.place, macroPos: { ...this.macroPos },
+      travelling: this.travelling, travelFrom: { ...this.travelFrom }, travelTo: { ...this.travelTo },
+      travelT: this.travelT, travelDur: this.travelDur, goal: this.goal,
+      figures: this.figures, partner: this.partnerMind ? this.partnerMind.toJSON() : null,
+      partnerNpcId: this.partnerNpcId, partnerBeatsLeft: this.partnerBeatsLeft,
+      socialDone: this.socialDone, shopDecided: this.shopDecided, carriedGroceries: this.carriedGroceries,
+      lastSocialAt: this.lastSocialAt, socialFuel: this.socialFuel, maraPhone: { ...this.maraPhone },
+      beatAcc: this.beatAcc, arbAcc: this.arbAcc, servedCount: this.servedCount, currentEvent: this.currentEvent,
+      workQueue: this.workQueue, workCurrent: this.workCurrent, workAgenda: this.workAgenda,
+      nextSpawnAt: this.nextSpawnAt, lastFinish: this.lastFinish, localeReady: this.localeReady,
+      focusIndex: this.focusIndex, speed: this.speed, paused: this.paused,
+    };
+  }
+
+  loadJSON(j: TownJSON): void {
+    if (this.rng.load) this.rng.load(j.rng);
+    Object.assign(this.resources, j.resources); this.resources.pantry = [...j.resources.pantry];
+    this.ledger = new Map(j.ledger);
+    this.density.cols = j.density.cols; this.density.rows = j.density.rows;
+    this.density.cell = Float32Array.from(j.density.cell); this.density.t = j.density.t;
+    this.density.placeCell = { ...j.density.placeCell };
+    this.needs = j.needs; this.needsIntegrals = j.needsIntegrals;
+    this.place = j.place; this.macroPos = { ...j.macroPos };
+    this.travelling = j.travelling; this.travelFrom = { ...j.travelFrom }; this.travelTo = { ...j.travelTo };
+    this.travelT = j.travelT; this.travelDur = j.travelDur; this.goal = j.goal;
+    this.figures = j.figures;
+    this.partnerNpcId = j.partnerNpcId; this.partnerBeatsLeft = j.partnerBeatsLeft;
+    this.partnerMind = null;
+    if (j.partner && j.partnerNpcId) {
+      const seed = this.ledger.get(j.partnerNpcId)?.profileSeed;
+      if (seed != null) this.partnerMind = MindLite.fromJSON(sampleProfile(seed), j.partner);
+    }
+    this.socialDone = j.socialDone; this.shopDecided = j.shopDecided; this.carriedGroceries = j.carriedGroceries;
+    this.lastSocialAt = j.lastSocialAt; this.socialFuel = j.socialFuel; Object.assign(this.maraPhone, j.maraPhone);
+    this.beatAcc = j.beatAcc; this.arbAcc = j.arbAcc; this.servedCount = j.servedCount; this.currentEvent = j.currentEvent;
+    this.workQueue = j.workQueue; this.workCurrent = j.workCurrent; this.workAgenda = j.workAgenda;
+    this.nextSpawnAt = j.nextSpawnAt; this.lastFinish = j.lastFinish; this.localeReady = j.localeReady;
+    this.focusIndex = j.focusIndex; this.speed = j.speed; this.paused = j.paused;
+    this.pendingLLM = false;
+  }
+
+  /** the deterministic RNG conversation closures capture — used on restore. */
+  get sharedRng(): RNG { return this.rng; }
+}
+
+export interface TownJSON {
+  rng: number;
+  resources: Resources;
+  ledger: [string, Relationship][];
+  density: { cols: number; rows: number; cell: number[]; t: number; placeCell: DensityField['placeCell'] };
+  needs: NeedsReadout; needsIntegrals: NeedsIntegrals;
+  place: PlaceId; macroPos: Vec2;
+  travelling: boolean; travelFrom: Vec2; travelTo: Vec2; travelT: number; travelDur: number;
+  goal: CurrentGoal;
+  figures: NpcLite[];
+  partner: MindLiteJSON | null; partnerNpcId: string | null; partnerBeatsLeft: number;
+  socialDone: boolean; shopDecided: boolean; carriedGroceries: boolean;
+  lastSocialAt: number; socialFuel: number; maraPhone: import('../types').PhoneState;
+  beatAcc: number; arbAcc: number; servedCount: number; currentEvent?: WorldEvent;
+  workQueue: Customer[]; workCurrent: Customer | null; workAgenda: WorldEvent[];
+  nextSpawnAt: number; lastFinish: number; localeReady: boolean;
+  focusIndex: number; speed: number; paused: boolean;
+}
+
+/** module id-counter accessors (for save/load reconciliation). */
+export function getTownEid(): number { return _eid; }
+export function setTownEid(n: number): void { _eid = n; }
+
+/** Mara's current sim intention → a home-activity pose token (mirrors the render). */
+function homePoseFor(kind: string): string {
+  switch (kind) {
+    case 'rest': return 'sleep';
+    case 'bathe': return 'shower';
+    case 'relieve': return 'toilet_pee';
+    case 'eat': case 'drink': return 'couch_tv';
+    default: return 'couch_tv';
   }
 }
 

@@ -17,6 +17,11 @@
 import type { Profile, SomaState, PartnerView } from '../types';
 import { clamp } from '../util/num';
 
+export interface MindLiteJSON {
+  valence: number; arousal: number; dominance: number;
+  warmth: number; threat: number; energy: number; openness: number;
+}
+
 export class MindLite {
   readonly name: string;
   // coarse state
@@ -81,6 +86,18 @@ export class MindLite {
       SEEKING: this.openness * 0.3,
       cortisol: 1 + this.threat * 0.9,
     };
+  }
+
+  // ---- persistence: the 7 coarse scalars (set-points recompute from the profile) --
+  toJSON(): MindLiteJSON {
+    return { valence: this.valence, arousal: this.arousal, dominance: this.dominance,
+      warmth: this.warmth, threat: this.threat, energy: this.energy, openness: this.openness };
+  }
+  static fromJSON(profile: Profile, j: MindLiteJSON): MindLite {
+    const m = new MindLite(profile);
+    m.valence = j.valence; m.arousal = j.arousal; m.dominance = j.dominance;
+    m.warmth = j.warmth; m.threat = j.threat; m.energy = j.energy; m.openness = j.openness;
+    return m;
   }
 
   /** a coarse read for the renderer + dashboard. */

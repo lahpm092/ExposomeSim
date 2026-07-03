@@ -139,6 +139,28 @@ export interface SomaParams {
   oxytocinGain: number;      // A × OXTR × attachment → social-reward response
   controlGain: number;       // C → dlPFC/vmPFC regulation efficacy
   recoveryRate: number;      // affect inertia (↓ N ⇒ faster return to baseline)
+
+  // --- neurodivergence axes (interpretable knobs, NOT diagnoses) --------------
+  // The ADHD axis governs how steeply the mind is pulled toward an immediately-
+  // available reward (the phone) over a duller ongoing task; the autism axis
+  // governs how well one reads others' intent and catches their affect — which
+  // sets the QUALITY of reciprocated social connection that emerges. See params.ts.
+  neuro: NeuroTraits;
+}
+
+/**
+ * Two continuous neurodivergence axes, derived from genotype × Big Five in
+ * params.ts. Nothing about behaviour is set here — these are gains that reshape
+ * how the phone-pull hazard, the sleep decision and the social-reward loop play
+ * out, so ADHD-like task-switching and autism-like connection difficulty EMERGE.
+ */
+export interface NeuroTraits {
+  // ADHD spectrum ------------------------------------------------------------
+  dopaminergicGain: number;  // ~[0.6,1.8] phasic reward sensitivity: steeper pull to salient immediate reward
+  impulsivity: number;       // 0..1 low delay-tolerance: switches to the rewarding option over the current task
+  // autism spectrum ----------------------------------------------------------
+  theoryOfMind: number;      // 0..1 capacity to model another's intent/state → sets reciprocation quality
+  mirroring: number;         // 0..1 emotional contagion: how strongly another's affect is caught & mirrored
 }
 
 // ---------------------------------------------------------------------------
@@ -448,6 +470,10 @@ export interface TownSnapshot extends WorldSnapshot {
   partner?: PartnerView;   // the currently-promoted, abstracted interaction partner
   protagonists?: string[]; // names of full-resolution protagonists in the sim
   others?: OtherAgentView[]; // additional full-resolution protagonists, for rendering
+  agents?: AgentPublic[];  // ALL fully-simulated characters (index 0 = Mara)
+  focus?: number;          // which agent the inspector panels (brain/psyche/memory) track
+  feed?: FeedView;         // the public social network (posts / comments / threads)
+  company?: CompanySnapshot; // the office's emergent goal, teams and internal net
 }
 
 /** A second full-resolution protagonist, projected for the renderer + dashboard. */
@@ -459,4 +485,225 @@ export interface OtherAgentView {
   valence: number; arousal: number; dominance: number; amygdala: number; cortisol: number;
   label: string;
   reason: string;
+}
+
+// ===========================================================================
+// 12. THE ROSTER — ten fully-simulated characters. Each is a full Character
+//   (soma + own memory GRAPH + physiology). Roles place them at two workplaces
+//   that are themselves buildings: the fast-food counter (cashier + boss +
+//   cleaner) and the office (six employees + boss). Nothing here is a schedule —
+//   behaviour emerges from each character's needs, soma and (new) work-psychology.
+// ===========================================================================
+export type RoleKind =
+  | 'cashier'        // Mara — the fast-food counter
+  | 'food_boss'      // the fast-food venue's boss/manager
+  | 'cleaner'        // the fast-food venue's cleaner (standing-fatigue ODE)
+  | 'office_worker'  // one of six low-level office employees
+  | 'office_boss';   // the office boss (the larger office)
+
+export type Workplace = 'foodcourt' | 'office';
+
+/** where an agent's BODY is, for the renderer (macro placement). */
+export type AgentPlace = 'home' | 'foodcourt' | 'office' | 'commuting';
+
+/** what an agent is doing this beat — drives the render pose AND the work-psych context. */
+export type WorkMode =
+  | 'home' | 'commuting'
+  | 'cashiering' | 'supervising' | 'cleaning' | 'resting'
+  | 'desk_working' | 'talking' | 'wandering' | 'idle';
+
+/**
+ * The emergent WORK-PSYCHOLOGY readout — a derived reading of the soma + role
+ * context, exactly like Maslow needs are a derived reading of the soma. Boredom
+ * and stimulation trade off on task; work-anxiety tracks felt job pressure; the
+ * cleaner's standing-fatigue is integrated by an ODE and drives their rest.
+ */
+export interface WorkPsych {
+  boredom: number;        // 0..1 — monotony / understimulation on task
+  stimulation: number;    // 0..1 — engagement / novelty / arousal at work
+  workAnxiety: number;    // 0..1 — felt pressure & threat about the job
+  standingHours: number;  // cleaner: continuous hours on their feet working
+  cleanerFatigue: number; // 0..1 — integrated bodily tiredness (the differential eq.)
+}
+
+/**
+ * A per-agent public snapshot: the FULL psyche (via CashierPublic) PLUS the role
+ * and macro placement the renderer + inspector need. The inspector panels read
+ * `agents[focus]`, so switching the camera to an agent switches every readout.
+ */
+export interface AgentPublic extends CashierPublic {
+  id: string;
+  role: RoleKind;
+  hatColor: number;          // distinct colour per agent (the hat)
+  interests: string[];       // seeded into the memory graph; shared ones spark talk
+  place: AgentPlace;
+  mode: WorkMode;
+  activity: string;          // ActivityKind token the renderer plays
+  homeIndex: number;         // which apartment flat (0..9)
+  station: number;           // role-specific station index (desk i / clean waypoint / counter)
+  commuteT: number;          // 0..1 while commuting (else 0)
+  workpsych?: WorkPsych;
+  conversationWith?: string; // name of the current chat partner (for the bubble), if any
+  saying?: string;           // the current spoken line (an emergent conversation utterance)
+
+  // --- phone / social-media engagement (emergent; see harness/phone.ts) -------
+  onPhone?: boolean;         // pulled the phone out right now (drives the phone prop + pose anywhere)
+  phoneHabit?: number;       // 0..1 slow addiction reservoir (grows with dopaminergic gain × past reward)
+  phoneCraving?: number;     // 0..1 acute pull-to-check
+  phoneSessions?: number;    // phone sessions so far today
+  posting?: boolean;         // authored a post/net-message this beat (bubble hint)
+  scrolling?: boolean;       // in a scroll session on the feed
+
+  // --- sleep / circadian (emergent; see harness/sleep.ts) ---------------------
+  asleep?: boolean;          // decided/needed to sleep right now (drives the supine pose)
+  sleepDrive?: SleepDrive;
+
+  // --- company / team (emergent; see sim/company.ts) --------------------------
+  team?: number;             // which coordinating team (spans floors); -1 = boss/none
+  netInfluence?: number;     // 0..1 how much others build on this agent's net contributions
+  isLeader?: boolean;        // emergent team leader this standup
+}
+
+// ===========================================================================
+// 13. PHONE / SOCIAL-MEDIA ENGAGEMENT — a per-agent runtime state, integrated by
+//   harness/phone.ts as a variable-ratio reward loop. The decision to pull the
+//   phone out is a per-tick hazard read off boredom (workpsych) + the ADHD axis
+//   (params.neuro) + an addiction reservoir + how engaged the current situation
+//   is + social-connection state. Nothing is scheduled.
+// ===========================================================================
+export interface PhoneState {
+  onPhone: boolean;       // currently using the phone (the one app: the social feed)
+  sessionT: number;       // sim-hours in the current session (0 when off)
+  feed: number;           // 0..1 novelty/freshness of the feed being scrolled (dulls as you scroll)
+  habit: number;          // 0..1 slow addiction reservoir (grows with dopaminergic gain × reward)
+  craving: number;        // 0..1 acute pull-to-check between sessions
+  sinceLast: number;      // sim-hours since the last session ended
+  lastEngagement: number; // [-1,1] valence of the last received social engagement (memory of "was it worth it")
+  sessionsToday: number;  // count since the ~04:00 rollover
+}
+
+// ===========================================================================
+// 14. SLEEP / CIRCADIAN — sleep onset EMERGES where homeostatic pressure (fatigue
+//   + the melatonin circadian gate) overtakes wake-pull (arousal / norepinephrine
+//   / cortisol / phone engagement / an active conversation). A derived readout,
+//   like Maslow needs or work-psych. See harness/sleep.ts.
+// ===========================================================================
+export interface SleepDrive {
+  pressure: number;      // 0..1 homeostatic + circadian push toward sleep (Process S + melatonin gate)
+  wakePull: number;      // 0..1 arousal/engagement pull AGAINST sleep
+  propensity: number;    // 0..1 smoothstep(pressure - wakePull) — the decision variable
+  asleep: boolean;       // the latched decision (hysteresis)
+  melatonin: number;     // the circadian channel value (for the panel)
+}
+
+// ===========================================================================
+// 15. THE PUBLIC SOCIAL NETWORK — an X/Twitter-like feed: short text posts, replies
+//   forming threads. WHAT is posted EMERGES from the author's soma/mood + a recent
+//   salient memory + interests; WHO engages emerges from interest overlap + the
+//   relationship ledger. Being replied-to/liked feeds belonging/oxytocin BACK into
+//   the poster's soma — the "listened-to → purpose" gradient. See sim/feed.ts.
+// ===========================================================================
+export interface FeedComment {
+  id: string;
+  authorId: string;
+  authorName: string;
+  t: number;
+  text: string;
+  warmth: number;        // [-1,1] how warm the reply is (mostly warm; a cold one stings)
+}
+export interface FeedPost {
+  id: string;
+  authorId: string;
+  authorName: string;
+  hatColor: number;      // author's identity colour (for the panel)
+  t: number;
+  topic: string;         // the interest/theme the post is about (drives resonance)
+  text: string;
+  valence: number;       // author affect at posting [-1,1]
+  likes: string[];       // ids of agents who liked it
+  comments: FeedComment[];
+}
+/** A bounded snapshot of the feed for the UI panel (most-recent first). */
+export interface FeedView {
+  posts: FeedPost[];
+  postCount: number;     // total ever posted (for the counter)
+}
+
+// ===========================================================================
+// 16. THE COMPANY — an emergent goal held ONLY in the boss's memory graph, teams
+//   that coordinate over an internal net toward subgoals, subgoal output that
+//   flows UP to the boss, who updates his memory and RE-DERIVES the goals via a
+//   mood-congruent retrieval (computational irreducibility). Nothing is scripted
+//   beyond the boss's initial seed memory. See sim/company.ts.
+// ===========================================================================
+export type NetMsgKind =
+  | 'directive'   // boss only: sets/steers a subgoal
+  | 'propose'     // opens a direction (bored + open temperaments)
+  | 'report'      // delivers concrete output (conscientious + pressured)
+  | 'support'     // builds on a teammate (agreeable + warm ledger)
+  | 'question'    // seeks info (open + uncertain)
+  | 'block'       // friction (tense ledger / neurotic / RAGE)
+  | 'ack';        // low-cost acknowledgement
+
+export interface NetMessage {
+  id: string;
+  t: number;
+  fromId: string;
+  fromName: string;
+  team: number;              // authoring team (-1 = boss / cross-team)
+  threadId: string;
+  parentId?: string;         // the message this replies to
+  kind: NetMsgKind;
+  topic: string;
+  text: string;
+  valence: number;
+  quality: number;           // 0..1 intrinsic contribution quality
+  coord: number;             // 0..2 coordination multiplier realised with the parent author
+}
+export interface Subgoal {
+  id: string;
+  topic: string;
+  target: number;
+  progress: number;          // 0..1
+  momentum: number;          // 0..1 recent contribution rate
+  dependsOn: string[];       // subgoal ids that GATE this one (team-to-team coupling)
+  lastActivity: number;
+}
+export interface TeamState {
+  id: number;
+  name: string;
+  memberIds: string[];
+  subgoal: Subgoal;
+  leaderId?: string;         // EMERGENT
+  cohesion: number;          // 0..1 mean intra-team ledger affection
+  tension: number;           // 0..1 max intra-team ledger tension
+  demand: number;            // 0..1 felt pressure fed back into WorkCtx.demand
+  output: number;            // magnitude of the last delivered output
+}
+export interface GoalTheme { topic: string; priority: number; }
+export interface CompanyGoal {
+  themes: GoalTheme[];       // machine-readable PROJECTION of the boss's goal memory
+  version: number;           // increments on each re-derivation
+  revisedAt: number;
+  narrative: string;         // human-readable current goal
+}
+export interface TeamOutput {
+  t: number;
+  team: number;
+  topic: string;
+  progress: number;
+  coordQuality: number;
+  leaderId?: string;
+  tensionFlag: boolean;
+  driftTopics: string[];     // what the team ACTUALLY discussed (fuel for NEW goals)
+}
+export interface CompanySnapshot {
+  goal: CompanyGoal;
+  teams: TeamState[];
+  feed: NetMessage[];        // recent internal-net messages, bounded
+  outputs: TeamOutput[];     // recent deliveries, bounded
+  bossId: string;
+  bossName: string;
+  bossValence: number;
+  planCountdown: number;     // sim-hours to next goal re-derivation
 }
