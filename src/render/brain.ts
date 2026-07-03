@@ -417,7 +417,9 @@ export class BrainPanel {
     this.clock += dt;
     if (this.ready) {
       try {
-        const soma = snap?.cashier?.soma as SomaState | undefined;
+        const anyS = snap as unknown as { agents?: { soma?: SomaState }[]; focus?: number };
+        const focusAgent = anyS.agents?.[anyS.focus ?? 0];
+        const soma = (focusAgent?.soma ?? snap?.cashier?.soma) as SomaState | undefined;
         const ch = CHANNEL_ORDER[this.cursor]!;
         const hot = CH2REG[ch] ?? [];
         const k = 1 - Math.exp(-9 * dt);

@@ -3,7 +3,7 @@
 // occludes cleanly + crisp ink edges). Every primitive is a solid whose visible
 // edges are drawn as black line-work, so furniture reads as clear geometric
 // shapes with as few polygons as possible. Coordinates are in REAL metres; the
-// caller scales the whole interior down (the 1/8 apartment trick) as one group.
+// caller scales the whole interior down (the 1/4 apartment trick) as one group.
 //
 // This is the shared vocabulary the apartment-modelling agents build against —
 // they never touch THREE directly, only these helpers, so their output drops in.

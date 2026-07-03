@@ -63,7 +63,8 @@ export class MemoryPanel {
 
   update(snap: TownSnapshot, dtReal: number): void {
     if (this.hidden) return;
-    const g = snap?.cashier?.memoryGraph;
+    const focusAgent = snap?.agents?.[snap.focus ?? 0];
+    const g = focusAgent?.memoryGraph ?? snap?.cashier?.memoryGraph;
     const W = this.canvas.clientWidth || 1, H = this.canvas.clientHeight || 1;
     const ctx = this.ctx;
     ctx.clearRect(0, 0, W, H);

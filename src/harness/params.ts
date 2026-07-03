@@ -9,7 +9,7 @@
 // =============================================================================
 import type {
   Profile, SomaParams, SomaChannel, CircadianTerm, CouplingEdge, Genotype,
-  BigFive, Experiosome, Attachment,
+  BigFive, Experiosome, Attachment, NeuroTraits,
 } from '../types';
 import { clamp, mulberry32, randn, weightedPick, type RNG } from '../util/num';
 
@@ -138,6 +138,8 @@ export function deriveParams(profile: Profile): SomaParams {
   const controlGain = clamp(1 + 0.28 * b.C + 0.05 * g.COMT_Met - 0.08 * x.aceScore + 0.05 * x.ses, 0.4, 1.8);
   const recoveryRate = clamp(1 - 0.28 * b.N + 0.10 * b.C, 0.35, 1.6);
 
+  const neuro = deriveNeuro(g, b, oxytocinGain);
+
   // individualize decay: neuroticism slows affective recovery; FKBP5 weakens HPA feedback
   const decay: Partial<Record<SomaChannel, number>> = { ...BASE_DECAY };
   for (const ch of ['amygdala', 'FEAR', 'RAGE', 'PANIC_GRIEF'] as SomaChannel[]) {
@@ -157,8 +159,45 @@ export function deriveParams(profile: Profile): SomaParams {
     noise: { ...BASE_NOISE },
     couplings: BASE_COUPLINGS,
     amygdalaGain, hpaFeedbackGain, d2Density, daClearancePFC,
-    rewardSensitivity, oxytocinGain, controlGain, recoveryRate,
+    rewardSensitivity, oxytocinGain, controlGain, recoveryRate, neuro,
   };
+}
+
+/**
+ * The two neurodivergence axes. As with every other gain here the coding is an
+ * interpretable knob, not a claim of determinism.
+ *
+ * ADHD axis — a hypodopaminergic/steeper-phasic account: a striatum with fewer D2
+ * receptors (DRD2_Taq1A A1), a hungrier novelty system (DRD4 7R), and faster DA
+ * reuptake (DAT1) runs a LOW tonic reward tone but reacts sharply to an immediate
+ * salient hit — so an ongoing dull task loses out to whatever is instantly
+ * rewarding. Low Conscientiousness reads as poor delay-tolerance (impulsivity).
+ *
+ * Autism axis — social-cognition capacity: reading intent (theory of mind) and
+ * catching affect (mirroring) rise with Agreeableness/Openness and the oxytocin
+ * system, and fall with the OXTR A allele (blunted social-reward/attunement) and,
+ * mildly, with very low Extraversion. These set how much reciprocated connection
+ * an encounter can actually yield.
+ */
+function deriveNeuro(g: Genotype, b: BigFive, oxytocinGain: number): NeuroTraits {
+  const dopaminergicGain = clamp(
+    1 + 0.16 * g.DRD4_7R + 0.12 * g.DAT1_VNTR + 0.10 * g.DRD2_Taq1A
+      + 0.10 * b.E - 0.12 * b.C,
+    0.6, 1.8,
+  );
+  const impulsivity = clamp(
+    0.42 - 0.16 * b.C + 0.08 * g.DRD4_7R + 0.05 * g.COMT_Met + 0.05 * b.E - 0.05 * b.A,
+    0, 1,
+  );
+  const theoryOfMind = clamp(
+    0.55 + 0.14 * b.A + 0.10 * b.O + 0.05 * b.E - 0.12 * g.OXTR_A - 0.05 * Math.max(0, -b.E),
+    0.05, 0.98,
+  );
+  const mirroring = clamp(
+    0.5 + 0.16 * b.A + 0.20 * (oxytocinGain - 1) - 0.14 * g.OXTR_A + 0.05 * b.N,
+    0.05, 0.98,
+  );
+  return { dopaminergicGain, impulsivity, theoryOfMind, mirroring };
 }
 
 // ---------------------------------------------------------------------------

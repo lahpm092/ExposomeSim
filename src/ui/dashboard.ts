@@ -375,7 +375,10 @@ export class Dashboard {
   // =========================================================================
   update(snap: WorldSnapshot): void {
     try {
-      const cashier = snap && snap.cashier ? snap.cashier : undefined;
+      // follow the camera's focused agent (falls back to Mara / the cashier).
+      const anyS = snap as unknown as { agents?: unknown[]; focus?: number };
+      const focusAgent = anyS.agents?.[anyS.focus ?? 0] as WorldSnapshot['cashier'] | undefined;
+      const cashier = focusAgent ?? (snap && snap.cashier ? snap.cashier : undefined);
       const soma = cashier ? (cashier.soma as any) : undefined;
       const readout = cashier ? cashier.readout : undefined;
       const integrals = cashier ? cashier.integrals : undefined;

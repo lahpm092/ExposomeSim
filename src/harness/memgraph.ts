@@ -409,6 +409,56 @@ export class MemoryGraph {
     return { id: n.id, t: n.createdAt, text: n.text, salience: n.salience, valence: n.valence,
       decay: Math.min(1, n.retrievability / (1 + n.salience)) };
   }
+
+  // ---- persistence ----------------------------------------------------------
+  /** flatten to plain JSON: Set<string> tokens → space-joined; Maps → entries. */
+  toJSON(): MemGraphJSON {
+    const nodes: MemNodeJSON[] = [];
+    for (const n of this.map.values()) {
+      nodes.push({ id: n.id, kind: n.kind, text: n.text, tokens: [...n.tokens].join(' '),
+        valence: n.valence, arousal: n.arousal, salience: n.salience,
+        encodingStrength: n.encodingStrength, retrievability: n.retrievability,
+        createdAt: n.createdAt, lastRecalledAt: n.lastRecalledAt, recallCount: n.recallCount });
+    }
+    const out: [string, MemEdge[]][] = [];
+    for (const [a, arr] of this.out) out.push([a, arr.map((e) => ({ ...e }))]);
+    return {
+      nodes, out, entities: [...this.entityByName.entries()],
+      activation: [...this.activation.entries()], lastEpisodic: this.lastEpisodic,
+    };
+  }
+
+  /** repopulate IN PLACE from JSON (ids preserved; module _seq restored separately). */
+  loadJSON(j: MemGraphJSON): void {
+    this.map.clear(); this.out.clear(); this.entityByName.clear(); this.activation.clear();
+    this.consolidating = false;
+    for (const n of j.nodes) {
+      const tokens = new Set<string>(n.tokens ? n.tokens.split(' ').filter(Boolean) : []);
+      this.map.set(n.id, { ...n, tokens });
+    }
+    for (const [a, arr] of j.out) this.out.set(a, arr.map((e) => ({ ...e })));
+    for (const [k, v] of j.entities) this.entityByName.set(k, v);
+    for (const [k, v] of j.activation) this.activation.set(k, v);
+    this.lastEpisodic = j.lastEpisodic;
+  }
 }
+
+interface MemNodeJSON {
+  id: string; kind: NodeKind; text: string; tokens: string;
+  valence: number; arousal: number; salience: number;
+  encodingStrength: number; retrievability: number;
+  createdAt: number; lastRecalledAt: number; recallCount: number;
+}
+export interface MemGraphJSON {
+  nodes: MemNodeJSON[];
+  out: [string, MemEdge[]][];
+  entities: [string, string][];
+  activation: [string, number][];
+  lastEpisodic: string | null;
+}
+
+/** module id-counter accessors (for save/load reconciliation). */
+export function getMemSeq(): number { return _seq; }
+export function setMemSeq(n: number): void { _seq = n; }
 
 function mean(xs: number[]): number { return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0; }

@@ -1,0 +1,12 @@
+import { chromium } from 'playwright';
+const b = await chromium.launch();
+const p = await (await b.newContext({ viewport:{width:1600,height:900} })).newPage();
+const logs=[];
+p.on('console', m=>logs.push(m.text()));
+p.on('pageerror', e=>logs.push('PAGEERR: '+e.message));
+await p.goto('http://localhost:5177/', { waitUntil:'networkidle', timeout:30000 });
+await p.waitForTimeout(6000);
+await p.screenshot({ path: process.env.CLAUDE_JOB_DIR+'/tmp/sim.png' });
+console.log('---LOGS---');
+console.log(logs.slice(-40).join('\n'));
+await b.close();
