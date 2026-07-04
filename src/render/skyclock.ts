@@ -80,13 +80,18 @@ const MONO = '"SFMono-Regular", ui-monospace, Menlo, monospace';
 // one-shot stylesheet injection — a corner placement + pointer-events:none so
 // the overlay never intercepts the camera drag. Guarded by id so N instances
 // (or a dispose/reconstruct) never duplicate the rule.
+//
+// Anchored TOP-RIGHT: the bottom-left corner is owned by #caption (the narration/
+// dialogue) and the tall top-left .cam-panel (agent roster) grows downward on a
+// short stage — parking the dial here keeps every overlay in its own corner
+// (roster TL · clock TR · caption BL · psyche BR) with no overlap.
 const STYLE_ID = 'skyclock-style';
 function ensureStyle(): void {
   if (typeof document === 'undefined' || document.getElementById(STYLE_ID)) return;
   const s = document.createElement('style');
   s.id = STYLE_ID;
   s.textContent =
-    '.skyclock{position:absolute;left:16px;bottom:16px;z-index:7;display:block;pointer-events:none;}';
+    '.skyclock{position:absolute;right:16px;top:16px;z-index:7;display:block;pointer-events:none;}';
   document.head.appendChild(s);
 }
 
