@@ -2,15 +2,15 @@
 // citystage.ts — the primary 3D view. A low-poly black-mesh city with a
 // multi-floor apartment BUILDING at its heart, inhabited by 10 agents who live
 // their home lives (climb stairs, open doors, sleep / watch TV / use a phone /
-// use the toilet / shower) at the compressed 1/4 → 1/16 projection scale.
+// use the toilet / shower). The city, every building interior and every apartment
+// share ONE real-metre scale, so a body is the SAME size on the street, in a
+// building and in a flat — it never changes size crossing a door. (See [[INT_SCALE]].)
 //
 // Camera has two modes:
-//   FOLLOW — orbit any of the 10 agents; the framing auto-scales with the agent's
-//            body size, so as she shrinks 1/4 (entering the building) and 1/4 again
-//            (entering her flat) the camera zooms in to keep her the same on screen.
+//   FOLLOW — orbit any of the 10 agents; the framing tracks the agent (body scale
+//            is now a constant 1 everywhere, so this is a plain orbit).
 //   FREE   — fly: drag to look, arrow keys to move (fwd/back/left/right), W/S for
-//            elevation. Move-speed + near-plane auto-scale with whichever space the
-//            camera is in (city → building interior → apartment interior).
+//            elevation.
 // A small on-screen panel switches between Free roam and each agent.
 // =============================================================================
 import * as THREE from 'three';
@@ -22,8 +22,8 @@ import {
   CITY, INT_SCALE, mapToWorld, makeCityMats, buildLocale, fillerBlock, lamp, parkedCar,
   type CityMats, type Locale,
 } from './worldgeo';
-import { APT_SCALE } from './building';
 import { AgentBodies } from './agentbodies';
+import { StreetLife } from './streetlife';
 import { buildFoodBuilding, type FoodBuilding } from './foodcourt';
 import { buildOfficeBuilding, type OfficeBuilding } from './office';
 import { ROSTER } from '../harness/roster';
@@ -69,6 +69,8 @@ export class CityStage {
   private food!: FoodBuilding;
   private office!: OfficeBuilding;
   private readonly figures = new Map<string, Humanoid>();
+  private streetLife!: StreetLife;
+  private readonly foodCounterW = new THREE.Vector3();  // counter, in WORLD space (to face customers at it)
   private focus = 0;
 
   // camera — follow (orbit) state
@@ -118,9 +120,10 @@ export class CityStage {
       this.agents.push(h);
     }
 
-    // the two WORKPLACES, each a building with the same shrink-through-the-door
-    // rule as home: the fast-food venue stands in the work locale; the office is a
-    // standalone building set a little apart in the city.
+    // the two WORKPLACES, each a real-metre building like home: the fast-food venue
+    // stands in the work locale; the office is a standalone building set a little
+    // apart in the city. INT_SCALE is 1 (unified scale), so setScalar is identity —
+    // kept only so the door-plane offset below stays parametric if it ever changes.
     const home = this.locales.get('home')!;
     home.group.updateMatrixWorld(true);
     const work = this.locales.get('work')!;
@@ -131,6 +134,8 @@ export class CityStage {
     work.interior.clear();                                   // drop the old flat counter room
     work.interior.add(foodGroup);
     work.group.updateMatrixWorld(true);
+    // customers in this venue face the counter, at the same real-metre scale as staff.
+    this.foodCounterW.copy(foodGroup.localToWorld(this.food.counterStaff.pos.clone()));
 
     this.office = buildOfficeBuilding(this.mats);
     const officeGroup = this.office.group;
@@ -146,6 +151,14 @@ export class CityStage {
       food: this.food, foodGroup,
       office: this.office, officeGroup,
     }, this.agents);
+
+    // ambient street life: simple wireframe extras that wander the city and, at
+    // random intervals, step into the fast-food venue (shrinking at the door like
+    // everyone else). They steer clear of the office footprint.
+    this.streetLife = new StreetLife(this.scene, this.food, {
+      count: 10, half: CITY * 0.44,
+      officePos: new V(26, 0, 4), officeR: 8,
+    });
 
     const start = home.group.localToWorld(new V(0, 0, 3.0));
     this.mara.place(start, home.yaw);
@@ -304,6 +317,24 @@ export class CityStage {
   /** which agent the inspector panels should track (last-followed agent). */
   get focusIndex(): number { return this.focus; }
 
+  /** dev-only: park the free camera at a fixed world vantage (pos + yaw/pitch) so
+   *  headless captures can inspect a space head-on without follow-zoom normalising
+   *  scale. yaw 0 looks toward +z; pitch <0 looks down. */
+  debugCam(x: number, y: number, z: number, yaw: number, pitch: number): void {
+    this.mode = 'free';
+    this.freePos.set(x, y, z);
+    this.freeYaw = yaw;
+    this.freePitch = pitch;
+    this.autoRot = false;
+    this.refreshCamUI();
+  }
+
+  /** dev-only: world position of an agent (for aiming debugCam at whoever is home). */
+  debugAgentPos(i: number): { x: number; y: number; z: number; scale: number } {
+    const h = this.agents[i] ?? this.mara;
+    return { x: h.pos.x, y: h.pos.y, z: h.pos.z, scale: h.object.scale.x };
+  }
+
   /** debug: per-body routing state (region / transiting / scale / pose). */
   agentDebug(): unknown { return this.agentBodies.debug(); }
 
@@ -326,6 +357,7 @@ export class CityStage {
       }
       this.maraWorld.copy(this.mara.pos);
       this.syncFigures(snap);
+      this.streetLife.update(dt);   // ambient wandering extras (own their own tick)
       this.updateLOD(snap);
     } catch { /* never break the loop */ }
 
@@ -375,20 +407,32 @@ export class CityStage {
     const list: NpcLite[] = (!snap.travelling && loc) ? (snap.locale?.figures ?? []) : [];
     const seen = new Set<string>();
     const pv = snap.partner;
+    // The fast-food venue is a BUILDING (foodGroup), not a flat locale room: its
+    // customers are placed in the building frame so they stand on its floor with the
+    // staff. Everything is one real-metre scale now, so bodyScale is 1 either way
+    // (kept as an expression in case a locale ever needs a per-frame scale again).
+    const inFood = snap.place === 'work';
+    const frame = inFood ? this.food.group : loc?.interior;
+    const bodyScale = inFood ? INT_SCALE : 1;
     for (const f of list) {
-      if (!f || typeof f.id !== 'string') continue;
+      if (!f || typeof f.id !== 'string' || !frame) continue;
       seen.add(f.id);
       let h = this.figures.get(f.id);
       const isPartner = f.goalToken === 'approach_mara' && !!pv;
-      const worldPos = loc!.interior.localToWorld(new V(f.pos.x, 0, f.pos.z));
+      const worldPos = frame.localToWorld(new V(f.pos.x, 0, f.pos.z));
+      const faceYaw = inFood
+        ? Math.atan2(this.foodCounterW.x - worldPos.x, this.foodCounterW.z - worldPos.z)  // face the counter
+        : loc!.yaw + (f.dir || Math.PI);
       if (!h) {
         h = new Humanoid(isPartner ? 'partner' : 'npc');
-        h.place(worldPos, (loc!.yaw + (f.dir || 0)));
+        h.place(worldPos, inFood ? faceYaw : (loc!.yaw + (f.dir || 0)));
+        h.snapScale(bodyScale);   // spawn already at venue scale (no giant flash)
         this.scene.add(h.object);
         this.figures.set(f.id, h);
       }
+      h.setScale(bodyScale);
       h.target.copy(worldPos);
-      h.targetYaw = loc!.yaw + (f.dir || Math.PI);
+      h.targetYaw = faceYaw;
       if (isPartner && pv) {
         h.embody(
           { valence: pv.valence, arousal: pv.arousal, dominance: pv.dominance, amygdala: pv.threat, cortisol: 1 + pv.threat },
@@ -470,23 +514,11 @@ export class CityStage {
     this.applyNear(Math.max(0.004, 0.4 * ctx));
   }
 
-  /** the scale of whatever space the camera is currently in (city 1 · building
-   *  INT_SCALE · apartment INT_SCALE·APT_SCALE), used to auto-scale free-fly
-   *  speed + near-plane. Thresholds are world-radii sized to each space. */
-  private contextScale(pos: THREE.Vector3): number {
-    const home = this.locales.get('home')!;
-    const b = home.building;
-    if (!b) return 1;
-    // nearest apartment interior (small sphere) → INT_SCALE·APT_SCALE (1/16)
-    let nearestApt = Infinity;
-    for (const apt of b.apartments) {
-      const c = apt.group.localToWorld(new V(0, 1.2, 0));
-      nearestApt = Math.min(nearestApt, pos.distanceTo(c));
-    }
-    if (nearestApt < 0.5) return INT_SCALE * APT_SCALE;
-    // building interior sphere → INT_SCALE (1/4)
-    const bc = b.group.localToWorld(new V(0, 4.5, 0));
-    if (pos.distanceTo(bc) < 3.5) return INT_SCALE;
+  /** the scale of whatever space the camera is in, used to auto-scale free-fly
+   *  speed + near-plane. The city, every building interior and every apartment now
+   *  share ONE real-metre scale ([[INT_SCALE]] = [[APT_SCALE]] = 1), so this is a
+   *  constant — the old per-space 1 / (1/4) / (1/16) branching is gone. */
+  private contextScale(_pos: THREE.Vector3): number {
     return 1;
   }
 
@@ -569,6 +601,7 @@ export class CityStage {
     removeEventListener('keyup', this.onKeyUp);
     this.bubble.remove();
     this.camPanel?.remove();
+    this.streetLife?.dispose();
     this.renderer.dispose();
   }
 }

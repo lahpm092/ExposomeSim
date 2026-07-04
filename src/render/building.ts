@@ -19,9 +19,12 @@ import { buildApartmentUnit, type ApartmentUnit } from './apartmentUnit';
 
 const V = THREE.Vector3;
 
-// The SECOND projection: each apartment (modelled at real metres) is shrunk by
-// this factor again inside the already-INT_SCALE building (×1/16 overall).
-export const APT_SCALE = 1 / 4;
+// UNIFIED SCALE (was 1/4, the "second projection"). Each apartment is modelled at
+// real metres and the building's slots are already dimensioned for a full-size
+// unit (columns 5.2 m apart for a 4.8 m-wide flat; the slot depth = the unit's own
+// zf). So drawing the flat at 1:1 fills its slot exactly and a resident keeps the
+// same real-metre size in the hallway and inside their flat. See [[INT_SCALE]].
+export const APT_SCALE = 1;
 
 // ---- building parameters (parametric: bump N_FLOORS / PER_SIDE for more) ----
 export const STOREY = 3.0;

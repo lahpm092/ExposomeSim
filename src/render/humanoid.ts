@@ -139,6 +139,10 @@ export class Humanoid {
   /** target body scale (smoothly approached) — the "shrink on entering" trick. */
   setScale(s: number): void { this.scaleTarget = s; }
 
+  /** snap the body scale instantly (spawn already shrunk — no smooth grow-in, so a
+   *  figure created INSIDE a 1/4-scale building never flashes at full size first). */
+  snapScale(s: number): void { this.scaleTarget = s; this.scaleV.v = s; this.object.scale.setScalar(s); }
+
   /** paint (and reveal) the identity hat in a distinct colour. */
   setHat(color: number): void { this.hatFill.color.setHex(color); this.hat.visible = true; }
 
