@@ -52,6 +52,12 @@ async function boot() {
   // Use '-' to slow toward the old faithful 0.005 pace; '+' to speed up.
   const session = new SimSession({ llm, consolidator, startHour: 7.5, speed: 0.02 });
   const stage = new CityStage(canvas);
+  // dev-only: expose the stage so headless screenshots can park the free camera
+  // at fixed vantage points (scale-verification — follow-zoom would hide it).
+  // (import.meta.env is a Vite injection; typed inline since tsconfig pins `types`.)
+  if ((import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV) {
+    (window as unknown as { __stage: CityStage }).__stage = stage;
+  }
   const dashboard = new Dashboard(dashEl);
   const branchBar = new BranchBar(dashEl, session);
   const townPanel = new TownPanel(dashEl);

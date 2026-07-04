@@ -7,12 +7,13 @@
 //   food    — the fast-food venue   (counter · kitchen · mop route · supply room)
 //   office  — the office building    (lobby → stairs → desks · hallway commons)
 //
-// THE SHRINK HAPPENS BEFORE THE DOOR OPENS. On entering any building the body
-// first walks to the outside approach at full size, then SHRINKS in place to the
-// interior scale while still outside, and only THEN does the door swing and the
-// (already-small) body cross the threshold — so the projection change reads as a
-// natural step through the door, not a pop mid-stride. The apartment adds a second
-// such shrink at the flat's own door (×1/4 again → ×1/16 overall).
+// ONE REAL-METRE SCALE THROUGHOUT. The body is the same size on the street, in a
+// building and in a flat (INT_SCALE = APT_SCALE = 1), so it never changes size at a
+// door. On entering a building it walks to the outside approach, pauses a beat at
+// the leaf while the door swings, and steps through — the leg scales below all
+// resolve to 1, so the pause is just a natural beat, not a projection change.
+// (This module used to shrink the body ×1/4 at the main door and ×1/4 again at the
+// flat door; the shrink legs remain as door-pause beats now that the scales are 1.)
 //
 // Positions are resolved to WORLD once per route (the buildings are static), so a
 // leg is just {world, scale, activity, door}. When the route is spent the body
@@ -31,8 +32,8 @@ import type { AgentPublic } from '../types';
 import { ROSTER, OFFICE_DESK_BY_ID } from '../harness/roster';
 
 const V = THREE.Vector3;
-const INT = INT_SCALE;              // building interior (1/4)
-const INT2 = INT_SCALE * APT_SCALE; // apartment interior (1/16)
+const INT = INT_SCALE;              // building-interior body scale (now 1 — unified)
+const INT2 = INT_SCALE * APT_SCALE; // apartment-interior body scale (now 1 — unified)
 
 type Region = 'outside' | 'home' | 'food' | 'office';
 type DoorTag = 'home_main' | 'food_main' | 'office_main' | 'apt' | 'closet' | 'desk';

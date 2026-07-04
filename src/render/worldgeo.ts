@@ -19,10 +19,13 @@ import { PLACES } from '../sim/places';
 import { PALETTE, lineMaterial } from './palette';
 import { buildBuilding, type Building } from './building';
 
-/** the "shrink on entering" scale: the apartment building is modelled at real
- *  metres, then drawn at 1/4 so it fits the tower and residents shrink to match.
- *  Each apartment inside is shrunk 1/4 AGAIN (→ 1/16) — the double projection. */
-export const INT_SCALE = 1 / 4;
+/** UNIFIED SCALE. The city, every building interior, every apartment and every
+ *  character all live at ONE real-metre scale — a 1.7 m person, a 2.5 m ceiling,
+ *  an 18 m tower — so nobody ever changes size crossing a door. (This constant
+ *  used to be 1/4: the building was drawn shrunk to a dollhouse and residents
+ *  shrank ×1/4 at the main door and ×1/4 again — [[APT_SCALE]] — at the flat door.
+ *  Both projections are now identity, so all the derived leg scales collapse to 1.) */
+export const INT_SCALE = 1;
 
 export const CITY = 66;            // metres across the town plane
 export const GROUND_Y = 0;
