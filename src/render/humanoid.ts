@@ -19,7 +19,7 @@
 // lines ride on top. Geometry is cheap boxes; the walk is pure joint rotation.
 // =============================================================================
 import * as THREE from 'three';
-import type { SomaState, EmotionReadout, Demeanor, Customer } from '../types';
+import type { SomaState, EmotionReadout, Demeanor, Customer } from '../core/types';
 import { C, PALETTE, clampNum } from './palette';
 import {
   POSES, DOOR_REACH, STAIR_FRAMES, STAIR_SECONDS, samplePose, blendFrame, triWave,

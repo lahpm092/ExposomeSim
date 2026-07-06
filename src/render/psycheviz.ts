@@ -5,7 +5,7 @@
 // spoke out from a centre; the filled polygon breathes with the soma in real time.
 // A toggle in the titlebar shows/hides it. Minimal by design — one glyph, no chrome.
 // =============================================================================
-import type { TownSnapshot, SomaState } from '../types';
+import type { TownSnapshot, SomaState } from '../core/types';
 
 const C = { paper: '#e9dec4', ink: '#20180f', inkSoft: '#5b4d38', faint: 'rgba(32,24,15,0.14)', accent: '#7a1f12', good: '#355e3b' };
 

@@ -1,8 +1,8 @@
 // Headless validation of the soma dynamics — no browser, no LLM.
 // Run: npx tsx scripts/harness-smoke.ts
-import { Character } from '../src/harness/character';
-import { CASHIER_PROFILE } from '../src/harness/params';
-import type { WorldEvent, LLMResponse, Appraisal } from '../src/types';
+import { Character } from '../src/mind/character';
+import { CASHIER_PROFILE } from '../src/mind/params';
+import type { WorldEvent, LLMResponse, Appraisal } from '../src/core/types';
 
 const char = new Character(CASHIER_PROFILE, { seed: 7, startHour: 11 });
 

@@ -13,7 +13,7 @@
 // Reads only from `snap.cashier`. Never throws on missing fields.
 // =============================================================================
 
-import type { WorldSnapshot } from '../types';
+import type { WorldSnapshot } from '../core/types';
 
 // ---------------------------------------------------------------------------
 // palette + fonts — resolved from style.css custom properties, with the

@@ -42,19 +42,19 @@ a slow **allostatic-load** integrator that is the exposome's memory.
 
 | area | files | role |
 |------|-------|------|
-| contract | `types.ts` | shared domain types — the single source of truth |
-| harness | `harness/params.ts` | genotype × CB5T Big Five × experiosome → soma physics; population sampling |
-| | `harness/soma.ts` | Euler–Maruyama integrator, circadian forcing, couplings, core-affect readout |
-| | `harness/appraisal.ts` | OCC/Scherer appraisal → soma kicks; Gross regulation strategies |
-| | `harness/emotion.ts` | constructed-emotion readout + **exposome integrals** |
-| | `harness/physiology.ts` | **causal homeostatic reservoirs** (satiety/hydration/bladder/bowel/hygiene) |
-| | `harness/needs.ts` | Maslow needs read off the soma + physiology (hunger, thirst, elimination, hygiene, …) |
-| | `harness/memgraph.ts` | **symbolic memory GRAPH** — ACT-R + Generative-Agents (see `MEMORY_DESIGN.md`) |
-| | `harness/mindlite.ts` | **abstracted interlocutor psyche** (lower causal resolution) |
-| | `harness/character.ts` | the unit: full soma + memory graph an LLM drives |
+| contract | `core/types.ts` | shared domain types — the single source of truth |
+| mind | `mind/params.ts` | genotype × CB5T Big Five × experiosome → soma physics; population sampling |
+| | `mind/soma.ts` | Euler–Maruyama integrator, circadian forcing, couplings, core-affect readout |
+| | `mind/appraisal.ts` | OCC/Scherer appraisal → soma kicks; Gross regulation strategies |
+| | `mind/emotion.ts` | constructed-emotion readout + **exposome integrals** |
+| | `mind/physiology.ts` | **causal homeostatic reservoirs** (satiety/hydration/bladder/bowel/hygiene) |
+| | `mind/needs.ts` | Maslow needs read off the soma + physiology (hunger, thirst, elimination, hygiene, …) |
+| | `mind/memgraph.ts` | **symbolic memory GRAPH** — ACT-R + Generative-Agents (see `MEMORY_DESIGN.md`) |
+| | `mind/mindlite.ts` | **abstracted interlocutor psyche** (lower causal resolution) |
+| | `mind/character.ts` | the unit: full soma + memory graph an LLM drives |
 | llm | `llm/client.ts` | swappable backend (Ollama now → remote API later) |
 | | `llm/prompt.ts` | interoception rendering, role-play contract, tolerant JSON parsing |
-| sim | `sim/town.ts`, `sim/arbiter.ts`, `sim/places.ts` | the level-of-detail town; needs-arbitrated agency |
+| world | `world/town.ts`, `world/arbiter.ts`, `world/places.ts` | the level-of-detail town; needs-arbitrated agency |
 | render | `render/citystage.ts` | three.js — the **orbit-camera 3D city** + LOD |
 | | `render/worldgeo.ts` · `render/humanoid.ts` | low-poly black-mesh buildings & **articulated humanoids** |
 | | `render/brain.ts` | MRI brain instrument with **live activation glow** |
@@ -206,19 +206,19 @@ one expensive resource — a full ~33-channel soma — only where **attention** 
 
 - **Tier 0 — Mara** runs the full psychological simulator every tick.
 - **Tier 2 — a partner** is promoted to a full soma *only while she's interacting with
-  them*, then distilled to a one-line **ledger** summary and demoted (`src/sim/town.ts`).
+  them*, then distilled to a one-line **ledger** summary and demoted (`src/world/town.ts`).
 - **Tier 1 — proximate NPCs** are cheap symbolic minds (path + goal token, no soma).
 - **Tier 3 — the city** is a pure population-density field — thousands implied, zero
-  instantiated (`src/sim/city.ts`).
+  instantiated (`src/world/city.ts`).
 
 Her day is **not scripted**. A Maslow **needs** layer is read off the soma
-(`src/harness/needs.ts`: hunger←ghrelin, energy←fatigue, belonging←a slow social
+(`src/mind/needs.ts`: hunger←ghrelin, energy←fatigue, belonging←a slow social
 reservoir + PANIC/GRIEF, safety←cortisol/amygdala, …) and an **arbiter**
-(`src/sim/arbiter.ts`) scores those deficits against place **affordances**
-(`src/sim/places.ts` — home · work · market · café · park) bound by money / food /
-energy / time (`src/sim/economy.ts`). The work→eat→home→shop→café loop is the *limit
+(`src/world/arbiter.ts`) scores those deficits against place **affordances**
+(`src/world/places.ts` — home · work · market · café · park) bound by money / food /
+energy / time (`src/econ/economy.ts`). The work→eat→home→shop→café loop is the *limit
 cycle* of those drives, not a calendar. **Relationships emerge** unscripted from
-reciprocated, oxytocin-rewarding encounters (`src/sim/relationship.ts`) — over a week
+reciprocated, oxytocin-rewarding encounters (`src/world/relationship.ts`) — over a week
 Mara forms a warm friendship with one café regular while another stays strained, with
 no `befriend` verb anywhere.
 
@@ -265,7 +265,7 @@ oven, hood, cabinets and fridge; a glass shower stall, toilet and vanity; bed, s
 plant) were authored by a fleet of **parallel modelling agents** against a shared geometry kit
 (`render/kit.ts`), with hand-built fallbacks.
 
-## The body — a causal homeostatic layer (`harness/physiology.ts`)
+## The body — a causal homeostatic layer (`mind/physiology.ts`)
 
 Beneath the neural soma sits a low-abstraction **reservoir layer** — the plumbing that *causes*
 felt need. Five reservoirs drain and fill by real-ish flux and drive the soma's interoceptive
@@ -288,11 +288,11 @@ convenient fallback, but she mostly cooks — grocery runs are proactive (restoc
 ## The psyche — an abstracted interlocutor
 
 Mara runs the full ~34-channel soma. Whoever she talks to is modelled by a **`MindLite`**
-(`harness/mindlite.ts`) — seven coarse scalars (valence, arousal, dominance, warmth, threat,
+(`mind/mindlite.ts`) — seven coarse scalars (valence, arousal, dominance, warmth, threat,
 energy, openness) with mood-inertia dynamics, at *lower causal resolution*. It is created when
 the exchange begins and **discarded when it ends**; only a one-line ledger gist survives.
 
-## The symbolic memory graph (`harness/memgraph.ts`, `MEMORY_DESIGN.md`)
+## The symbolic memory graph (`mind/memgraph.ts`, `MEMORY_DESIGN.md`)
 
 Memory is a **graph of text-bearing nodes updated numerically every frame, consolidated
 symbolically off the hot path** — *numeric retrieval, symbolic consolidation*. Nodes are

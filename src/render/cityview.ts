@@ -9,8 +9,8 @@
 //   Self-mounts a full-bleed canvas over the stage + a CITY toggle in the titlebar
 //   (mirrors BrainPanel). 2D canvas, not WebGL — the locale stage stays the 3D view.
 // =============================================================================
-import type { TownSnapshot, PlaceId, Relationship } from '../types';
-import { PLACES, PLACE_LIST } from '../sim/places';
+import type { TownSnapshot, PlaceId, Relationship } from '../core/types';
+import { PLACES, PLACE_LIST } from '../world/places';
 
 const C = {
   paper: '#e9dec4', paperDeep: '#ded2b4', ink: '#20180f',

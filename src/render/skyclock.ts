@@ -10,7 +10,7 @@
 // hides it; it self-mounts into a stage corner with pointer-events:none so it
 // can never steal the camera drag. Mirrors PsychePanel/MemoryPanel exactly.
 // =============================================================================
-import type { TownSnapshot } from '../types';
+import type { TownSnapshot } from '../core/types';
 
 // ---------------------------------------------------------------------------
 // palette — resolved from style.css custom properties (the same --paper/--ink/

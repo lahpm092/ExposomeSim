@@ -10,7 +10,7 @@
 // looks right even before any external CSS exists. It only re-renders when the
 // visible content actually changes, so it never clobbers scroll/selection.
 // =============================================================================
-import type { TownSnapshot, FeedView, FeedPost, FeedComment } from '../types';
+import type { TownSnapshot, FeedView, FeedPost, FeedComment } from '../core/types';
 
 const MAX_POSTS = 8;    // most-recent posts shown as threads
 const MAX_COMMENTS = 3; // replies shown under each post

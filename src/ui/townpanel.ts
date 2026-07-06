@@ -4,7 +4,7 @@
 //   need deficits, the resource economy (money / food / savings), and the
 //   relationship ledger as it forms. Self-mounts into the dashboard aside.
 // =============================================================================
-import type { TownSnapshot, NeedsReadout } from '../types';
+import type { TownSnapshot, NeedsReadout } from '../core/types';
 
 const PLACE_LABEL: Record<string, string> = {
   home: 'Apartment', work: 'The Counter', market: 'Market', thirdplace: 'Café', park: 'Park',

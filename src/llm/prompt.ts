@@ -9,8 +9,8 @@
 import type {
   Profile, SomaState, EmotionReadout, MemoryItem, WorldEvent,
   ChatMessage, LLMResponse, Appraisal, RegulationStrategy,
-} from '../types';
-import { clamp } from '../util/num';
+} from '../core/types';
+import { clamp } from '../core/util/num';
 
 const REGULATIONS: RegulationStrategy[] = [
   'reappraisal', 'suppression', 'situation-selection', 'distraction', 'rumination', 'acceptance', 'none',

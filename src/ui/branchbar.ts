@@ -6,7 +6,7 @@
 // active one marked — click any node to JUMP (the current one is frozen + saved
 // first). Export/Import round-trips the whole tree as a file.
 // =============================================================================
-import type { SimSession } from '../sim/session';
+import type { SimSession } from '../persist/session';
 
 const STYLE_ID = 'branchbar-style';
 const CSS = `

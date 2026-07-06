@@ -1,6 +1,6 @@
 // Headless proof that the needs-driven daily loop EMERGES (no schedule) and that
 // a relationship forms across re-encounters. Run: npx tsx scripts/town-smoke.ts
-import { Town } from '../src/sim/town';
+import { Town } from '../src/world/town';
 
 const town = new Town({ llm: null, seed: 7, startHour: 7, speed: 0.05 });
 const DT_SIM = 0.03;                 // sim-hours per step

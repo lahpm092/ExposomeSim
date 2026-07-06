@@ -20,7 +20,7 @@ import type { CityMats } from './worldgeo';
 import type { Kit } from './kit';
 import { makeKit } from './kit';
 import { makeDoor, type DoorRef } from './doorkit';
-import { OFFICE_FLOORS, OFFICE_COMMONS_PER_FLOOR } from '../harness/roster';
+import { OFFICE_FLOORS, OFFICE_COMMONS_PER_FLOOR } from '../mind/roster';
 
 const V = THREE.Vector3;
 const YAXIS = new THREE.Vector3(0, 1, 0);

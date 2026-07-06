@@ -16,7 +16,7 @@ import type {
   TeamState,
   NetMessage,
   NetMsgKind,
-} from '../types';
+} from '../core/types';
 
 const STYLE_ID = 'company-panel-style';
 

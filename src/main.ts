@@ -4,7 +4,7 @@
 //   visualization      → Stage.update(snapshot)  (three.js)
 //   instrument readout → Dashboard.update(snapshot)  (canvas panels)
 // =============================================================================
-import { SimSession } from './sim/session';
+import { SimSession } from './persist/session';
 import { OllamaClient, probeOllama } from './llm/client';
 import { CityStage } from './render/citystage';
 import { BrainPanel } from './render/brain';
@@ -19,7 +19,7 @@ import { SocialFeedPanel } from './ui/socialfeed';
 import { CompanyPanel } from './ui/companypanel';
 import { EconomyPanel } from './ui/econpanel';
 import { BranchBar } from './ui/branchbar';
-import type { TownSnapshot } from './types';
+import type { TownSnapshot } from './core/types';
 
 const canvas = document.getElementById('scene') as HTMLCanvasElement;
 const dashEl = document.getElementById('dashboard') as HTMLElement;

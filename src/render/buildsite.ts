@@ -20,7 +20,7 @@
 // =============================================================================
 import * as THREE from 'three';
 import { makeCityMats, fillerBlock } from './worldgeo';
-import type { Building } from '../sim/econ/types';
+import type { Building } from '../econ/types';
 
 /** Shared material set (paper fill + three ink line weights + green). */
 type Mats = ReturnType<typeof makeCityMats>;

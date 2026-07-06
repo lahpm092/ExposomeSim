@@ -5,7 +5,7 @@
 // Node size tracks salience×retrievability; a node currently ACTIVATED by recall
 // glows and names itself. A titlebar toggle shows/hides it over the stage.
 // =============================================================================
-import type { TownSnapshot, MemGraphView, MemNodeKind } from '../types';
+import type { TownSnapshot, MemGraphView, MemNodeKind } from '../core/types';
 
 const C = {
   paper: '#e9dec4', ink: '#20180f', inkSoft: '#5b4d38', inkFaint: '#9b8a68',

@@ -28,8 +28,8 @@ import { INT_SCALE } from './worldgeo';
 import type { Humanoid } from './humanoid';
 import type { ActivityKind } from './poses';
 import { swingDoor, type DoorRef } from './doorkit';
-import type { AgentPublic } from '../types';
-import { ROSTER, OFFICE_DESK_BY_ID } from '../harness/roster';
+import type { AgentPublic } from '../core/types';
+import { ROSTER, OFFICE_DESK_BY_ID } from '../mind/roster';
 
 const V = THREE.Vector3;
 const INT = INT_SCALE;              // building-interior body scale (now 1 — unified)

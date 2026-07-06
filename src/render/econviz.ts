@@ -22,8 +22,8 @@
 // Same family as memoryviz/psycheviz: 2D canvas, ink on aged paper, titlebar
 // toggle (plus the `e` key wired in main.ts).
 // =============================================================================
-import type { TownSnapshot } from '../types';
-import type { EconSnapshot, EconHistoryView, EconEvent } from '../sim/econ/types';
+import type { TownSnapshot } from '../core/types';
+import type { EconSnapshot, EconHistoryView, EconEvent } from '../econ/types';
 
 const C = {
   paper: '#e9dec4', ink: '#20180f', inkSoft: '#5b4d38', inkFaint: '#9b8a68',

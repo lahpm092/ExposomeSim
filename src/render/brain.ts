@@ -17,9 +17,9 @@
 //   by Anderson M. Winkler — https://brainder.org/research/brain-for-blender/
 // =============================================================================
 import * as THREE from 'three';
-import type { WorldSnapshot, SomaChannel, SomaState } from '../types';
+import type { WorldSnapshot, SomaChannel, SomaState } from '../core/types';
 import { PALETTE, C, lineMaterial, disposeObject, clampNum } from './palette';
-import { isModulator } from '../harness/params';
+import { isModulator } from '../mind/params';
 
 // ---- channel → responsible structure id(s) ---------------------------------
 const CH2REG: Record<SomaChannel, string[]> = {

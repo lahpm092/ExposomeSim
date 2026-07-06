@@ -3,7 +3,7 @@
 // Vite proxy (/ollama → :11434). Swap this implementation for a remote API later;
 // the rest of the app only depends on the LLMClient interface.
 // =============================================================================
-import type { LLMClient, ChatMessage, JsonSchema } from '../types';
+import type { LLMClient, ChatMessage, JsonSchema } from '../core/types';
 
 export interface OllamaOpts { model?: string; baseUrl?: string; think?: boolean; numPredict?: number; }
 

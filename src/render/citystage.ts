@@ -14,7 +14,7 @@
 // A small on-screen panel switches between Free roam and each agent.
 // =============================================================================
 import * as THREE from 'three';
-import type { TownSnapshot, PlaceId, Vec2, NpcLite, IntentionKind } from '../types';
+import type { TownSnapshot, PlaceId, Vec2, NpcLite, IntentionKind } from '../core/types';
 import { PALETTE, clampNum } from './palette';
 import { Humanoid } from './humanoid';
 import type { ActivityKind } from './poses';
@@ -30,9 +30,9 @@ import { buildSupermarket } from './supermarket';
 import { buildFederalReserve, buildCommercialBank } from './civicbank';
 import { BankCrowd, type CrowdAnchor } from './bankcrowd';
 import { syncConstruction, type ConstructionRegistry } from './buildsite';
-import { ROSTER } from '../harness/roster';
-import { PLACES } from '../sim/places';
-import { BUILD_LOTS } from '../sim/econ/config';
+import { ROSTER } from '../mind/roster';
+import { PLACES } from '../world/places';
+import { BUILD_LOTS } from '../econ/config';
 
 const V = THREE.Vector3;
 const PLACE_IDS: PlaceId[] = ['home', 'work', 'market', 'thirdplace', 'park'];

@@ -14,8 +14,8 @@
 // weights) so the M1 stays cool: the cost is tiny box geometry, not state churn.
 // =============================================================================
 import * as THREE from 'three';
-import type { PlaceId, Vec2, IntentionKind } from '../types';
-import { PLACES } from '../sim/places';
+import type { PlaceId, Vec2, IntentionKind } from '../core/types';
+import { PLACES } from '../world/places';
 import { PALETTE, lineMaterial } from './palette';
 import { buildBuilding, type Building } from './building';
 

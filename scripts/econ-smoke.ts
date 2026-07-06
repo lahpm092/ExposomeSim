@@ -1,6 +1,6 @@
 // Headless proof that the market ECONOMY emerges (no scripting) and that the
 // memory embedding tier works offline. Run: npx tsx scripts/econ-smoke.ts
-import { Town } from '../src/sim/town';
+import { Town } from '../src/world/town';
 import { getEmbedder, cosine } from '../src/llm/embed';
 
 const town = new Town({ llm: null, seed: 7, startHour: 7, speed: 0.05 });

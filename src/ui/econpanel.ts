@@ -26,7 +26,7 @@ import type {
   BankView,
   SupermarketView,
   MonetaryView,
-} from '../sim/econ/types';
+} from '../econ/types';
 
 const STYLE_ID = 'econ-panel-style';
 
