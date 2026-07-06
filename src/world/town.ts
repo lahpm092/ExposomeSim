@@ -27,6 +27,7 @@ import {
   dueRent, payRent, FOOD_VOCAB,
 } from '../econ/economy';
 import { EconomySim, type EconJSON } from '../econ/econsim';
+import { CausalField } from '../causal';
 import { chooseIntention } from './arbiter';
 import { newRelationship, updateBond, distillSummary, decayBonds } from './relationship';
 import { createDensity, stepDensity, expectedAt } from './city';
@@ -73,6 +74,12 @@ export class Town {
   /** the market economy: wallets for all full-res agents + firms + markets + a
    *  probabilistic shadow population (macro effects). Steps on its own ~1h clock. */
   readonly economy: EconomySim;
+  /** the causal radius + evolving venue surrogate: venues near a main character
+   *  are simulated as DISCRETE events (and teach the surrogate); the cold world
+   *  drifts on the learned average causality. Resolution, never conservation. */
+  readonly causal = new CausalField();
+  private lastCausalSeq = -1;
+  private lastCausalClock = 0;
   /** which of the ten agents the inspector panels track (0 = Mara). */
   focusIndex = 0;
   llm: LLMClient | null;
@@ -225,6 +232,36 @@ export class Town {
     //    wallets/firms/markets/labour + the shadow population (self-throttled to ~1h).
     this.economy.mirrorMara(this.resources.money, this.resources.foodStock);
     this.economy.step({ clock: this.clock, dtHours: dt, weekday: !this.weekend, rng: this.rng, agents: this.society.econInputs() });
+
+    // 8) the causal layer rides the econ tick: each fresh tick, the premises
+    //    venues' EXACT flow slices are handed to the field, which discretizes
+    //    the hot ones (near a main character) into watched arrivals and lets
+    //    the cold ones drift on the learned surrogate.
+    if (this.economy.tickSeq !== this.lastCausalSeq) {
+      const dtH = Math.max(this.clock - this.lastCausalClock, 1e-6);
+      this.lastCausalSeq = this.economy.tickSeq;
+      this.lastCausalClock = this.clock;
+      this.causal.tick(this.causalCenters(), this.economy.venuePoints(), this.economy.venueFlows(), this.clock, dtH);
+    }
+  }
+
+  /** world-metre positions of the main characters: Mara's continuous macro
+   *  position plus one center per PLACE currently occupied by a Tier-A agent.
+   *  (0..1 town coords → metres uses the same (p−0.5)·66 the render's
+   *  mapToWorld applies — see render/worldgeo.ts CITY.) */
+  private causalCenters(): { id: string; x: number; z: number }[] {
+    const M = 66;
+    const w = (p: { x: number; y: number }) => ({ x: (p.x - 0.5) * M, z: (p.y - 0.5) * M });
+    const centers: { id: string; x: number; z: number }[] = [{ id: 'mara', ...w(this.macroPos) }];
+    const seen = new Set<string>();
+    for (const place of this.society.occupiedPlaces()) {
+      if (seen.has(place)) continue;
+      seen.add(place);
+      if (place === 'home') centers.push({ id: 'pl-home', ...w(PLACES.home.pos2D) });
+      else if (place === 'foodcourt') centers.push({ id: 'pl-foodcourt', ...w(PLACES.work.pos2D) });
+      else if (place === 'office') centers.push({ id: 'pl-office', x: 26, z: 4 }); // citystage officeGroup
+    }
+    return centers;
   }
 
   /** the lightweight boredom/stimulation proxy Mara's phone loop reads (she has no
@@ -717,6 +754,7 @@ export class Town {
       feed: this.society.feedView(),
       company: this.society.companySnapshot(),
       economy: this.economy.snapshot(),
+      causal: this.causal.view(),
     };
   }
 
@@ -741,6 +779,7 @@ export class Town {
       nextSpawnAt: this.nextSpawnAt, lastFinish: this.lastFinish, localeReady: this.localeReady,
       focusIndex: this.focusIndex, speed: this.speed, paused: this.paused,
       economy: this.economy.toJSON(),
+      causal: this.causal.toJSON(),
     };
   }
 
@@ -770,6 +809,8 @@ export class Town {
     this.focusIndex = j.focusIndex; this.speed = j.speed; this.paused = j.paused;
     this.pendingLLM = false;
     if (j.economy) this.economy.loadJSON(j.economy);
+    if (j.causal) this.causal.loadJSON(j.causal);
+    this.lastCausalSeq = -1; this.lastCausalClock = this.clock;
   }
 
   /** the deterministic RNG conversation closures capture — used on restore. */
@@ -794,6 +835,7 @@ export interface TownJSON {
   nextSpawnAt: number; lastFinish: number; localeReady: boolean;
   focusIndex: number; speed: number; paused: boolean;
   economy?: EconJSON;
+  causal?: unknown;
 }
 
 /** module id-counter accessors (for save/load reconciliation). */

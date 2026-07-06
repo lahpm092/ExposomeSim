@@ -86,6 +86,7 @@ export class EconomySim {
 
   private macro: MacroAggregates;
   private acc = 0;                 // econ-tick accumulator (sim-hours)
+  private tickCount = 0;           // econ ticks fired (the causal layer keys off it)
   private lastClock = 0;
   private cpiPrev = 1;
   private gdpEMA = 0;
@@ -213,6 +214,47 @@ export class EconomySim {
     if (this.acc < ECON_TICK_HOURS) return;
     const dt = this.acc; this.acc = 0;
     this.econTick(dt, ctx);
+    this.tickCount++;
+  }
+
+  // ---- the causal layer's window into the economy ---------------------------
+  /** increments once per econ tick — the Town keys the causal tick off it. */
+  get tickSeq(): number { return this.tickCount; }
+
+  /** venue positions for the causal radius: every premises-based maker/retail
+   *  firm, in WORLD METRES (unit → lot coords — the frame the render uses). */
+  venuePoints(): { id: string; x: number; z: number; archetype: string }[] {
+    const out: { id: string; x: number; z: number; archetype: string }[] = [];
+    for (const b of this.businesses) {
+      if (!b.premisesUnitId) continue;
+      const unit = this.premises.unitById(b.premisesUnitId);
+      const lot = unit && this.lotXZ(unit.lotId);
+      if (!lot) continue;
+      out.push({ id: b.id, x: lot.x, z: lot.z, archetype: b.archetype ?? 'workshop' });
+    }
+    return out;
+  }
+
+  /** last-tick per-venue flow slices for the causal layer (units + revenue).
+   *  These are the EXACT aggregates the econ tick already booked — the causal
+   *  layer only decides where they become discrete, watched events. */
+  venueFlows(): { venueId: string; units: number; revenue: number }[] {
+    const out: { venueId: string; units: number; revenue: number }[] = [];
+    for (const b of this.businesses) {
+      if (!b.premisesUnitId) continue;
+      const v = b.view();
+      out.push({ venueId: b.id, units: v.unitsSold, revenue: v.revenue });
+    }
+    return out;
+  }
+
+  private lotMap?: Map<string, { x: number; z: number }>;
+  private lotXZ(lotId: string): { x: number; z: number } | undefined {
+    if (!this.lotMap) {
+      this.lotMap = new Map();
+      for (const l of BUILD_LOTS) this.lotMap.set(l.id, { x: l.x, z: l.z });
+    }
+    return this.lotMap.get(lotId);
   }
 
   // ===================== the econ tick =====================================

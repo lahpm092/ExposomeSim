@@ -15,6 +15,7 @@
 // ---------------------------------------------------------------------------
 // The economy subsystem keeps its own self-contained contract (sim/econ/types.ts);
 // the Town surfaces a snapshot of it on TownSnapshot for the HUD.
+import type { CausalView } from '../causal/types';
 import type { EconSnapshot } from '../econ/types';
 export type { EconSnapshot };
 
@@ -480,6 +481,7 @@ export interface TownSnapshot extends WorldSnapshot {
   feed?: FeedView;         // the public social network (posts / comments / threads)
   company?: CompanySnapshot; // the office's emergent goal, teams and internal net
   economy?: EconSnapshot;  // the market economy: wallets, firms, prices, labour, macro
+  causal?: CausalView;     // the causal radius + learned venue surrogate (hot set, stats)
 }
 
 /** A second full-resolution protagonist, projected for the renderer + dashboard. */

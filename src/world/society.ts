@@ -158,6 +158,14 @@ export class Society {
 
   setMaraMacro(m: MaraMacro): void { this.mara = m; }
 
+  /** distinct places any full-res agent occupies right now (the causal layer
+   *  puts a radius center on each — main characters carry causality with them). */
+  occupiedPlaces(): AgentPlace[] {
+    const seen = new Set<AgentPlace>();
+    for (const rt of this.rts) seen.add(rt.place);
+    return [...seen];
+  }
+
   /** the public feed + the company state, for the Town's snapshot. */
   feedView(): FeedView { return this.feedNet.view(); }
   companySnapshot(): CompanySnapshot { return this.company.snapshot(); }
