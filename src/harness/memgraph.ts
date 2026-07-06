@@ -19,6 +19,8 @@
 // graph accessors for the live visualization.
 // =============================================================================
 import type { MemoryItem, SomaState, LLMClient, MemGraphView, MemNodeKind, MemEdgeKind } from '../types';
+import { getEmbedder, cosine, EMBED_DIM, type Embedder } from '../llm/embed';
+import { clamp } from '../util/num';
 
 export type NodeKind = MemNodeKind;
 export type EdgeKind = MemEdgeKind;
@@ -27,7 +29,9 @@ export interface MemNode {
   id: string;
   kind: NodeKind;
   text: string;
-  tokens: Set<string>;      // keyword bag — the cheap "embedding"
+  tokens: Set<string>;      // keyword bag — the lexical "embedding" (always-on fallback tier)
+  vec?: Float32Array;       // dense embedding (256-d, unit-norm), filled async off the hot path
+  vec0?: Float32Array;      // the encoding-time vector — an anchor that bounds reconsolidation drift
   valence: number;
   arousal: number;
   salience: number;         // emotional importance at encode [0,1]
@@ -43,10 +47,29 @@ export interface MemEdge { to: string; kind: EdgeKind; w: number; }
 const D = 0.5;              // ACT-R decay exponent
 const RECALL_BUMP = 0.8;    // strength added per recall
 const DRIFT = 0.14;         // reconsolidation pull toward current context
-const W_R = 1.0, W_I = 1.0, W_V = 1.2, W_A = 0.55, W_M = 0.35; // score weights
+const W_R = 1.0, W_I = 1.0, W_A = 0.55, W_M = 0.35; // score weights (relevance now hybrid — see W_LEX/W_VEC)
 const RETR_FLOOR = 0.04;    // below this an episodic is inaccessible (still available)
 const MAX_EPISODIC = 220;   // prune the coldest episodics beyond this
 const SIM_SEPARATE = 0.82;  // encode similarity above which we reconsolidate not add
+
+// ---- v3: embeddings × graph (MEMORY_V3_DESIGN.md; research §a,b) ------------
+// The dense tier is ADDITIVE: it augments the lexical scorer, never replaces it.
+const W_LEX = 0.5;          // weight on lexical token-overlap relevance
+const W_VEC = 1.0;          // weight on dense cosine relevance (0-contribution if no vec)
+const CUE_Q = 0.6;          // cue = CUE_Q·query-embed ⊕ CUE_C·context-vector (TCM/CMR)
+const CUE_C = 0.4;
+const BETA_ENC = 0.70;      // context drift rate while PERCEIVING (encoding)  [CMR: β_enc>β_rec]
+const BETA_REC = 0.35;      // context drift rate while RECALLING
+const NN_SEED = 12;         // #vector nearest-neighbours injected as spreading seeds
+const NN_SEED_ENERGY = 0.9; // energy injected per vector-NN seed
+// reconsolidation drift (research §B.2): PE-gated, type-dependent, strength-damped
+const DRIFT_ALPHA: Record<NodeKind, number> = { episodic: 0.10, semantic: 0.03, schema: 0.008, entity: 0.02 };
+const DRIFT_THETA: Record<NodeKind, number> = { episodic: 0.10, semantic: 0.20, schema: 0.30, entity: 0.20 };
+const DRIFT_GAMMA = 0.20;   // pull of the drift target toward the schema prototype (Bartlett bias)
+const DRIFT_KAPPA = 0.7;    // strength-damping: older/stronger memories drift less
+const DRIFT_ANCHOR = 0.02;  // restoring force toward the encoding vector (keeps the gist)
+const CONSOLIDATE_COS = 0.55; // vector-space cluster threshold for gist formation
+const ASSOC_COS = 0.60;     // materialize an assoc edge when two episodics are this close
 
 const STOP = new Set(('a an the you your i my me we it is are was were be to of and or but in on at ' +
   'for with as by that this these those he she they them his her not no yes do did done so if then ' +
@@ -114,6 +137,11 @@ export class MemoryGraph {
   private readonly activation = new Map<string, number>(); // last retrieval activation (for viz)
   private consolidating = false;
 
+  // ---- v3: dense embeddings + the drifting context vector -------------------
+  private readonly embedder: Embedder = getEmbedder();   // shared singleton (shared cache/batching)
+  private ctx = new Float32Array(EMBED_DIM);             // CMR context vector (unit-norm; the retrieval cue)
+  private backfillAcc = 0;                               // throttle async embed backfill
+
   // ---- construction ---------------------------------------------------------
   /** seed durable formative memories (from the experiosome). */
   seed(texts: string[], t = 0): void {
@@ -139,7 +167,7 @@ export class MemoryGraph {
       const s = sim(tokens, n.tokens);
       if (s > nearS) { nearS = s; near = n; }
     }
-    if (near) { this.reconsolidate(near, tokens, soma.valence, t); return this.project(near); }
+    if (near) { this.reconsolidate(near, tokens, soma.valence, t, this.embedder.cached(text) ?? undefined); return this.project(near); }
 
     const node = this.addNode('episodic', text, soma.valence, soma.arousal, salience, t);
     node.encodingStrength = 1 + salience;
@@ -167,8 +195,19 @@ export class MemoryGraph {
       encodingStrength: 1, retrievability: 1,
       createdAt: t, lastRecalledAt: t, recallCount: 1,
     };
+    // grab a dense vector if the shared cache already has this text (memory strings
+    // repeat heavily across the 18 agents); else this enqueues it for async backfill.
+    this.assignVec(n, this.embedder.cached(text));
     this.map.set(n.id, n);
     return n;
+  }
+
+  /** assign a COPY of a cached embedding to a node (never the shared cache object —
+   *  reconsolidation drift mutates node.vec in place). Also seeds the anchor vec0. */
+  private assignVec(n: MemNode, vec: Float32Array | null): void {
+    if (!vec) return;
+    n.vec = vec.slice();
+    n.vec0 = vec.slice();
   }
 
   private link(a: string, b: string, kind: EdgeKind, w: number): void {
@@ -207,6 +246,44 @@ export class MemoryGraph {
       const na = a * Math.exp(-0.9 * dtHours);
       if (na < 0.02) this.activation.delete(id); else this.activation.set(id, na);
     }
+    // v3: opportunistically fill dense vectors + advance the context vector — batched,
+    // fire-and-forget, fully off the hot path. Throttled to ~one beat.
+    this.backfillAcc += dtHours;
+    if (this.backfillAcc >= 0.05) { this.backfillAcc = 0; void this.backfill(); }
+  }
+
+  /** compute a batch of pending embeddings and bind freshly-available vectors to
+   *  the nodes that still lack them, advancing the CMR context vector per new
+   *  episodic (in Map insertion order) — the leaky-integrator context, reconstructed
+   *  asynchronously so the tick never waits on the embedder. */
+  private async backfill(): Promise<void> {
+    await this.embedder.flush();
+    for (const n of this.map.values()) {
+      if (n.vec) continue;
+      const v = this.embedder.cached(n.text);
+      if (!v) continue;
+      this.assignVec(n, v);
+      if (n.kind === 'episodic' && n.vec) this.driftContext(n.vec, BETA_ENC);
+    }
+  }
+
+  /** drift the context vector toward `v`: ctx ← normalize(ρ·ctx + β·v)  (TCM/CMR). */
+  private driftContext(v: Float32Array, beta: number): void {
+    const rho = Math.sqrt(Math.max(0, 1 - beta * beta));
+    const c = this.ctx;
+    for (let i = 0; i < c.length; i++) c[i] = rho * c[i] + beta * v[i];
+    unitInPlace(c);
+  }
+
+  /** the retrieval cue: the query embedding blended with the ambient context vector
+   *  (encoding specificity + recency + contiguity). Zero when no embeddings exist yet
+   *  → the scorer falls back cleanly to the lexical tier. */
+  private cueVector(query: string): Float32Array {
+    const out = new Float32Array(EMBED_DIM);
+    const q = this.embedder.cached(query);   // sync hit or null (enqueues the miss)
+    const c = this.ctx;
+    for (let i = 0; i < out.length; i++) out[i] = CUE_Q * (q ? q[i] : 0) + CUE_C * c[i];
+    return unitInPlace(out);
   }
 
   // ---- RETRIEVE (hot path, bounded spreading activation) --------------------
@@ -216,19 +293,35 @@ export class MemoryGraph {
 
   retrieveNodes(query: string, k = 4, mood = 0): MemNode[] {
     const cue = tokenize(query);
+    const cueVec = this.cueVector(query);   // query-embed ⊕ context (TCM/CMR)
     const now = this.now();
     const act = new Map<string, number>();
+    const bySim: { id: string; cos: number }[] = [];   // for vector-NN seeding
 
-    // seed: every node scored by recency + salience + relevance + mood congruence.
+    // seed: every node scored by recency + HYBRID relevance (lexical ⊕ dense) +
+    // salience + mood congruence + ACT-R base level.
     for (const n of this.map.values()) {
       if (n.retrievability < RETR_FLOOR && n.kind === 'episodic') continue;
       const recency = Math.pow(0.995, Math.max(0, now - n.lastRecalledAt));
-      const relevance = sim(cue, n.tokens);
+      const lex = sim(cue, n.tokens);
+      const cos = n.vec ? cosine(cueVec, n.vec) : 0;
+      const relevance = W_LEX * lex + W_VEC * cos;
       const base = this.baseLevel(n, now);
       const moodFit = 1 - Math.abs(mood - n.valence) / 2;
-      const s = W_R * recency + W_I * n.salience + W_V * relevance + W_M * moodFit + 0.15 * base;
+      const s = W_R * recency + W_I * n.salience + relevance + W_M * moodFit + 0.15 * base;
       if (s > 0.05) act.set(n.id, s);
+      if (cos > 0.15) bySim.push({ id: n.id, cos });
     }
+
+    // vector-seeded spreading activation (research §a: "cosine finds the door"):
+    // inject energy at the cue's nearest neighbours in embedding space, so a memory
+    // can light up by MEANING even with zero shared tokens, then pull in its graph
+    // neighbours below.
+    bySim.sort((a, b) => b.cos - a.cos);
+    for (const { id, cos } of bySim.slice(0, NN_SEED)) {
+      act.set(id, (act.get(id) ?? 0) + NN_SEED_ENERGY * cos);
+    }
+
     // one-hop spread along assoc/about/is_a/temporal edges (pattern completion).
     const seeds = [...act.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
     for (const [id, a] of seeds) {
@@ -238,12 +331,16 @@ export class MemoryGraph {
     }
 
     const ranked = [...act.entries()].sort((a, b) => b[1] - a[1]).slice(0, k);
-    // publish activation for the viz, and reconsolidate the winners.
+    // publish activation for the viz, and reconsolidate the winners (strengthen + drift).
     for (const [id, a] of ranked) {
       this.activation.set(id, Math.max(this.activation.get(id) ?? 0, Math.min(1, a)));
       const n = this.map.get(id);
-      if (n) this.reconsolidate(n, cue, mood, now);
+      if (n) this.reconsolidate(n, cue, mood, now, cueVec);
     }
+    // context maintenance: the cue reshapes context (recall drift), then the winning
+    // memories reinstate THEIR context (temporal-contiguity chaining).
+    this.driftContext(cueVec, BETA_REC);
+    for (const [id] of ranked) { const n = this.map.get(id); if (n?.vec) this.driftContext(n.vec, BETA_REC * 0.4); }
     return ranked.map(([id]) => this.map.get(id)!).filter(Boolean);
   }
 
@@ -255,15 +352,74 @@ export class MemoryGraph {
   }
 
   // ---- RECONSOLIDATION (recall strengthens AND distorts) --------------------
-  private reconsolidate(n: MemNode, cue: Set<string>, mood: number, now: number): void {
+  private reconsolidate(n: MemNode, cue: Set<string>, mood: number, now: number, cueVec?: Float32Array): void {
     n.recallCount += 1;
     n.lastRecalledAt = now;
     n.encodingStrength += RECALL_BUMP;
     n.retrievability = Math.max(n.retrievability, 1) + RECALL_BUMP * 0.5;
-    // drift: absorb a few cue tokens; nudge affect toward the current mood.
+    // distortion channel 1 (lexical, keeps the viz legible): absorb a couple cue tokens.
     let added = 0;
-    for (const t of cue) { if (!n.tokens.has(t) && added < 2 && Math.random?.() !== undefined) { n.tokens.add(t); added++; } }
+    for (const t of cue) { if (!n.tokens.has(t) && added < 2) { n.tokens.add(t); added++; } }
+    // distortion channel 2 (affective): nudge the tag toward the current mood.
     n.valence += DRIFT * (mood - n.valence);
+    // distortion channel 3 (semantic): drift the dense vector toward the retrieval
+    // context — PE-gated, type-dependent, strength-damped, schema-biased, anchored.
+    if (cueVec) this.driftVec(n, cueVec);
+  }
+
+  /** reconsolidation vector drift (research §B.2). Bounded so cumulative recall
+   *  reshapes a memory toward its retrieval context + schema without erasing its gist. */
+  private driftVec(n: MemNode, cueVec: Float32Array): void {
+    const v = n.vec, v0 = n.vec0;
+    if (!v || !v0) return;
+    const d = 1 - cosine(v, cueVec);                 // prediction error (0 = identical)
+    const theta = DRIFT_THETA[n.kind];
+    if (d < theta) return;                            // a matching recall doesn't overwrite
+    const gate = clamp((d - theta) / (1 - theta), 0, 1);
+    const s = clamp(n.recallCount / 8, 0, 1);        // strength proxy → older memories drift less
+    const alpha = DRIFT_ALPHA[n.kind] * gate / (1 + DRIFT_KAPPA * s);
+    const proto = this.prototypeOf(n) ?? cueVec;     // drift target biased toward the gist prototype
+    for (let i = 0; i < v.length; i++) {
+      const target = (1 - DRIFT_GAMMA) * cueVec[i] + DRIFT_GAMMA * proto[i];
+      v[i] += alpha * (target - v[i]) - DRIFT_ANCHOR * (v[i] - v0[i]);
+    }
+    unitInPlace(v);
+  }
+
+  /** the schema/gist prototype a node is filed under (its is_a parent's vector), if any. */
+  private prototypeOf(n: MemNode): Float32Array | null {
+    for (const e of this.out.get(n.id) ?? []) {
+      if (e.kind !== 'is_a') continue;
+      const p = this.map.get(e.to);
+      if (p?.vec) return p.vec;
+    }
+    return null;
+  }
+
+  /** similarity between two nodes — dense cosine when both are embedded, else lexical. */
+  private memSim(a: MemNode, b: MemNode): number {
+    if (a.vec && b.vec) return cosine(a.vec, b.vec);
+    return sim(a.tokens, b.tokens);
+  }
+
+  /** renormalized centroid of a cluster's dense vectors (the prototype); null if none. */
+  private centroid(cluster: MemNode[]): Float32Array | null {
+    const acc = new Float32Array(EMBED_DIM);
+    let n = 0;
+    for (const c of cluster) { if (!c.vec) continue; for (let i = 0; i < acc.length; i++) acc[i] += c.vec[i]; n++; }
+    if (!n) return null;
+    return unitInPlace(acc);
+  }
+
+  /** materialize assoc edges between the meaning-nearest members of a cluster. */
+  private linkAssocByVec(cluster: MemNode[]): void {
+    for (let i = 0; i < cluster.length; i++) {
+      const a = cluster[i]; if (!a.vec) continue;
+      for (let j = i + 1; j < cluster.length; j++) {
+        const b = cluster[j]; if (!b.vec) continue;
+        if (cosine(a.vec, b.vec) >= ASSOC_COS) { this.link(a.id, b.id, 'assoc', 0.5); this.link(b.id, a.id, 'assoc', 0.5); }
+      }
+    }
   }
 
   // ---- CONSOLIDATION / REFLECTION (off hot path; optional LLM) --------------
@@ -280,7 +436,8 @@ export class MemoryGraph {
       const used = new Set<string>();
       for (const seed of eps) {
         if (used.has(seed.id)) continue;
-        const cluster = eps.filter((n) => !used.has(n.id) && sim(seed.tokens, n.tokens) > 0.5);
+        // cluster by MEANING (dense cosine) when vectors exist, else the lexical tier.
+        const cluster = eps.filter((n) => !used.has(n.id) && this.memSim(seed, n) > (seed.vec && n.vec ? CONSOLIDATE_COS : 0.5));
         if (cluster.length < 3) continue;
         cluster.forEach((c) => used.add(c.id));
         const gist = await this.gist(cluster, llm);
@@ -288,8 +445,16 @@ export class MemoryGraph {
           0.3, Math.max(...cluster.map((c) => c.salience)), now);
         sem.encodingStrength = 2; sem.retrievability = 2;
         sem.recallCount = cluster.reduce((s, c) => s + c.recallCount, 0);
+        // the gist's dense vector is the renormalized centroid of its members
+        // (prototype theory) — so the gist is itself retrievable, and it becomes the
+        // schema prototype that member reconsolidation drifts toward.
+        const centroid = this.centroid(cluster);
+        if (centroid) { sem.vec = centroid; sem.vec0 = centroid.slice(); }
         this.linkEntities(sem);
         for (const c of cluster) { this.link(c.id, sem.id, 'is_a', 0.8); c.retrievability *= 0.6; }
+        // learned association: wire the meaning-nearest members together (assoc edges
+        // discovered from embedding geometry, not just co-occurrence).
+        this.linkAssocByVec(cluster);
       }
     } finally { this.consolidating = false; }
   }
@@ -337,6 +502,8 @@ export class MemoryGraph {
     }
     const s = this.addNode('schema', text, mean(recent.map((r) => r.valence)), 0.2, 0.8, now);
     s.encodingStrength = 2.4; s.retrievability = 2.4;
+    const centroid = this.centroid(recent);
+    if (centroid) { s.vec = centroid; s.vec0 = centroid.slice(); }
     for (const r of recent) this.link(s.id, r.id, 'is_a', 0.6);
   }
 
@@ -418,13 +585,15 @@ export class MemoryGraph {
       nodes.push({ id: n.id, kind: n.kind, text: n.text, tokens: [...n.tokens].join(' '),
         valence: n.valence, arousal: n.arousal, salience: n.salience,
         encodingStrength: n.encodingStrength, retrievability: n.retrievability,
-        createdAt: n.createdAt, lastRecalledAt: n.lastRecalledAt, recallCount: n.recallCount });
+        createdAt: n.createdAt, lastRecalledAt: n.lastRecalledAt, recallCount: n.recallCount,
+        vec: n.vec ? Array.from(n.vec) : undefined, vec0: n.vec0 ? Array.from(n.vec0) : undefined });
     }
     const out: [string, MemEdge[]][] = [];
     for (const [a, arr] of this.out) out.push([a, arr.map((e) => ({ ...e }))]);
     return {
       nodes, out, entities: [...this.entityByName.entries()],
       activation: [...this.activation.entries()], lastEpisodic: this.lastEpisodic,
+      ctx: Array.from(this.ctx),
     };
   }
 
@@ -434,12 +603,21 @@ export class MemoryGraph {
     this.consolidating = false;
     for (const n of j.nodes) {
       const tokens = new Set<string>(n.tokens ? n.tokens.split(' ').filter(Boolean) : []);
-      this.map.set(n.id, { ...n, tokens });
+      const node: MemNode = {
+        id: n.id, kind: n.kind, text: n.text, tokens,
+        valence: n.valence, arousal: n.arousal, salience: n.salience,
+        encodingStrength: n.encodingStrength, retrievability: n.retrievability,
+        createdAt: n.createdAt, lastRecalledAt: n.lastRecalledAt, recallCount: n.recallCount,
+        vec: n.vec ? Float32Array.from(n.vec) : undefined,
+        vec0: n.vec0 ? Float32Array.from(n.vec0) : undefined,
+      };
+      this.map.set(n.id, node);
     }
     for (const [a, arr] of j.out) this.out.set(a, arr.map((e) => ({ ...e })));
     for (const [k, v] of j.entities) this.entityByName.set(k, v);
     for (const [k, v] of j.activation) this.activation.set(k, v);
     this.lastEpisodic = j.lastEpisodic;
+    this.ctx = (j.ctx && j.ctx.length === EMBED_DIM) ? Float32Array.from(j.ctx) : new Float32Array(EMBED_DIM);
   }
 }
 
@@ -448,6 +626,7 @@ interface MemNodeJSON {
   valence: number; arousal: number; salience: number;
   encodingStrength: number; retrievability: number;
   createdAt: number; lastRecalledAt: number; recallCount: number;
+  vec?: number[]; vec0?: number[];
 }
 export interface MemGraphJSON {
   nodes: MemNodeJSON[];
@@ -455,6 +634,7 @@ export interface MemGraphJSON {
   entities: [string, string][];
   activation: [string, number][];
   lastEpisodic: string | null;
+  ctx?: number[];
 }
 
 /** module id-counter accessors (for save/load reconciliation). */
@@ -462,3 +642,12 @@ export function getMemSeq(): number { return _seq; }
 export function setMemSeq(n: number): void { _seq = n; }
 
 function mean(xs: number[]): number { return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0; }
+
+/** L2-normalize a vector in place (unit vectors make cosine a plain dot product). */
+function unitInPlace(v: Float32Array): Float32Array {
+  let n = 0;
+  for (let i = 0; i < v.length; i++) n += v[i] * v[i];
+  n = Math.sqrt(n);
+  if (n > 1e-9) for (let i = 0; i < v.length; i++) v[i] /= n;
+  return v;
+}
