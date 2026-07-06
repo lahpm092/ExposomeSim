@@ -16,6 +16,7 @@ import { TownPanel } from './ui/townpanel';
 import { Dashboard } from './ui/dashboard';
 import { SocialFeedPanel } from './ui/socialfeed';
 import { CompanyPanel } from './ui/companypanel';
+import { EconomyPanel } from './ui/econpanel';
 import { BranchBar } from './ui/branchbar';
 import type { TownSnapshot } from './types';
 
@@ -62,6 +63,7 @@ async function boot() {
   const branchBar = new BranchBar(dashEl, session);
   const townPanel = new TownPanel(dashEl);
   const companyPanel = new CompanyPanel(dashEl);
+  const econPanel = new EconomyPanel({ mount: dashEl });
   const socialFeed = new SocialFeedPanel(dashEl);
   const brain = new BrainPanel(dashEl, titlebar);
   const city = new CityView(stageEl, titlebar);
@@ -91,6 +93,7 @@ async function boot() {
     dashboard.update(snap);
     townPanel.update(snap);
     companyPanel.update(snap);
+    econPanel.update(snap);
     socialFeed.update(snap);
     brain.update(snap, dtReal);
     city.update(snap, dtReal);

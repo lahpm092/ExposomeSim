@@ -26,6 +26,7 @@ import {
   createResources, tickWork, canBuyGroceries, buyGroceries, buyMeal, canEat, consumeMeal,
   dueRent, payRent, FOOD_VOCAB,
 } from './economy';
+import { EconomySim, type EconJSON } from './econ/econsim';
 import { chooseIntention } from './arbiter';
 import { newRelationship, updateBond, distillSummary, decayBonds } from './relationship';
 import { createDensity, stepDensity, expectedAt } from './city';
@@ -69,6 +70,9 @@ export class Town {
   readonly protagonists: Character[] = [];
   /** the other nine full minds + the emergent conversations between them. */
   readonly society: Society;
+  /** the market economy: wallets for all full-res agents + firms + markets + a
+   *  probabilistic shadow population (macro effects). Steps on its own ~1h clock. */
+  readonly economy: EconomySim;
   /** which of the ten agents the inspector panels track (0 = Mara). */
   focusIndex = 0;
   llm: LLMClient | null;
@@ -144,6 +148,12 @@ export class Town {
     // seeded with its interests, living its role-driven day and free to strike up
     // emergent conversations. Mara ([0]) is stepped here; the Society steps 1..9.
     this.society = new Society(this.mara, { seed: opts.seed ?? 7, startHour: opts.startHour ?? 7.5 });
+    // the market economy over ALL full-res agents (Mara [0] is mirrored from her
+    // legacy ledger; the other 17 are driven fully) + the probabilistic shadow pop.
+    this.economy = new EconomySim(
+      ROSTER.map((e, i) => ({ id: e.profile.id, name: e.profile.name, isMara: i === 0 })),
+      { seed: opts.seed ?? 7, clock: this.clock },
+    );
   }
 
   get clock(): number { return this.mara.soma.t; }
@@ -210,6 +220,11 @@ export class Town {
     this.society.step(dt, { clock: this.clock, weekday: !this.weekend, rng: this.rng });
     // being heard online eases the loneliness reservoir (belonging → a felt purpose).
     this.socialFuel = clamp(this.socialFuel + this.society.takeMaraBelonging() * 0.6, 0, 1);
+
+    // 7) the market economy: mirror Mara's legacy ledger into her wallet, then advance
+    //    wallets/firms/markets/labour + the shadow population (self-throttled to ~1h).
+    this.economy.mirrorMara(this.resources.money, this.resources.foodStock);
+    this.economy.step({ clock: this.clock, dtHours: dt, weekday: !this.weekend, rng: this.rng, agents: this.society.econInputs() });
   }
 
   /** the lightweight boredom/stimulation proxy Mara's phone loop reads (she has no
@@ -701,6 +716,7 @@ export class Town {
       agents, focus: this.focusIndex,
       feed: this.society.feedView(),
       company: this.society.companySnapshot(),
+      economy: this.economy.snapshot(),
     };
   }
 
@@ -724,6 +740,7 @@ export class Town {
       workQueue: this.workQueue, workCurrent: this.workCurrent, workAgenda: this.workAgenda,
       nextSpawnAt: this.nextSpawnAt, lastFinish: this.lastFinish, localeReady: this.localeReady,
       focusIndex: this.focusIndex, speed: this.speed, paused: this.paused,
+      economy: this.economy.toJSON(),
     };
   }
 
@@ -752,6 +769,7 @@ export class Town {
     this.nextSpawnAt = j.nextSpawnAt; this.lastFinish = j.lastFinish; this.localeReady = j.localeReady;
     this.focusIndex = j.focusIndex; this.speed = j.speed; this.paused = j.paused;
     this.pendingLLM = false;
+    if (j.economy) this.economy.loadJSON(j.economy);
   }
 
   /** the deterministic RNG conversation closures capture — used on restore. */
@@ -775,6 +793,7 @@ export interface TownJSON {
   workQueue: Customer[]; workCurrent: Customer | null; workAgenda: WorldEvent[];
   nextSpawnAt: number; lastFinish: number; localeReady: boolean;
   focusIndex: number; speed: number; paused: boolean;
+  economy?: EconJSON;
 }
 
 /** module id-counter accessors (for save/load reconciliation). */
