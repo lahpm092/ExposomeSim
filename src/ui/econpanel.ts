@@ -26,6 +26,8 @@ import type {
   BankView,
   SupermarketView,
   MonetaryView,
+  WholesaleView,
+  PremisesView,
 } from '../econ/types';
 
 const STYLE_ID = 'econ-panel-style';
@@ -118,11 +120,17 @@ export class EconomyPanel {
       this.body.appendChild(this.buildBusinesses(econ.businesses));
       this.body.appendChild(subHead('Markets'));
       this.body.appendChild(this.buildMarkets(econ.markets, econ.housing));
+      if (econ.wholesale?.length) {
+        this.body.appendChild(subHead('Wholesale · makers → shelves'));
+        this.body.appendChild(this.buildWholesale(econ.wholesale));
+      }
       this.body.appendChild(subHead('Labour'));
       this.body.appendChild(this.buildLabour(econ.labor));
       if (econ.construction || econ.bank || econ.supermarket) {
         this.body.appendChild(subHead('City · construction · bank'));
-        this.body.appendChild(this.buildCityDev(econ.construction, econ.bank, econ.supermarket));
+        this.body.appendChild(this.buildCityDev(
+          econ.builders?.length ? econ.builders : (econ.construction ? [econ.construction] : []),
+          econ.bank, econ.supermarket, econ.premises));
       }
       if (econ.monetary) {
         this.body.appendChild(subHead('Money · Fed · banking'));
@@ -250,20 +258,34 @@ export class EconomyPanel {
     return wrap;
   }
 
-  // -- city development: construction firm + bank + supermarket inventory ----
-  private buildCityDev(c?: ConstructionView, bk?: BankView, sm?: SupermarketView): HTMLElement {
+  // -- the wholesale strip: per-good clearing price vs its world-price anchor --
+  private buildWholesale(ws: WholesaleView[]): HTMLElement {
+    const wrap = el('div', 'econ-markets');
+    for (const w of ws) wrap.appendChild(wholesaleRow(w));
+    return wrap;
+  }
+
+  // -- city development: both builders + premises + bank + supermarket ---------
+  private buildCityDev(builders: ConstructionView[], bk?: BankView, sm?: SupermarketView, prem?: PremisesView): HTMLElement {
     const wrap = el('div', 'econ-shadow');
-    if (c) {
+    for (const c of builders) {
       const head = el('div', 'econ-shadow-head');
       head.appendChild(shChip(c.name, undefined));
       head.appendChild(shChip(`${c.workers} crew`, undefined));
       head.appendChild(shChip(`${c.completedBuildings} built`, rgb(GOOD_RGB)));
       if (c.activeProjects > 0) head.appendChild(shChip('building…', rgb(GOOD_RGB)));
-      head.appendChild(shChip(`${c.lotsFree} lots free`, undefined));
+      head.appendChild(shChip(money(c.cash), undefined));
+      if (c.loanBalance > 1) head.appendChild(shChip(`owes ${money(c.loanBalance)}`, rgb(BAD_RGB)));
       wrap.appendChild(head);
+    }
+    if (builders.length) {
       const stats = el('div', 'econ-shadow-stats');
-      stats.appendChild(kv('site cash', money(c.cash)));
-      stats.appendChild(kv('loan owed', money(c.loanBalance)));
+      stats.appendChild(kv('lots free', String(builders[0].lotsFree)));
+      if (prem) {
+        stats.appendChild(kv('premises', `${prem.units} units · ${prem.vacant} vacant`));
+        stats.appendChild(kv('leases signed', String(prem.leases)));
+        stats.appendChild(kv('awaiting premises', prem.pending > 0 ? `${prem.pending} firm${prem.pending > 1 ? 's' : ''}` : 'none'));
+      }
       wrap.appendChild(stats);
     }
     if (bk) {
@@ -375,14 +397,24 @@ function bizCard(b: BusinessView): HTMLElement {
   const card = el('div', 'econ-biz');
   if (b.bankrupt) card.classList.add('bankrupt');
 
-  // header: name + sector chip
+  // header: name + supply-chain role chip + sector chip
   const head = el('div', 'econ-biz-head');
   const name = el('span', 'econ-biz-n');
   name.textContent = b.name || b.id;
   name.title = b.name || b.id;
+  if (b.kind === 'maker' || b.kind === 'retail') {
+    const role = el('span', 'econ-chip');
+    role.textContent = b.kind === 'maker' ? `⚒ ${(b.good ?? 'maker').toUpperCase()}` : 'RETAIL';
+    role.title = b.kind === 'maker'
+      ? `makes ${b.good} for the wholesale market`
+      : 'buys at wholesale, sells off the shelf';
+    head.append(name, role);
+  } else {
+    head.append(name);
+  }
   const chip = el('span', 'econ-chip');
   chip.textContent = (b.sector ?? '').toUpperCase();
-  head.append(name, chip);
+  head.append(chip);
   card.appendChild(head);
 
   // money line: cash · price · wage
@@ -414,6 +446,19 @@ function bizCard(b: BusinessView): HTMLElement {
   staff.append(count, badge);
   card.appendChild(staff);
 
+  // retail: the shelf level; makers/entrants: the premises situation.
+  if (b.kind === 'retail' && typeof b.shelfStock === 'number') {
+    const shelf = el('div', 'econ-biz-count');
+    shelf.textContent = `shelf ${fmtNum(b.shelfStock)} / ${fmtNum(b.shelfCap ?? 0)}`;
+    card.appendChild(shelf);
+  }
+  if (b.pendingPremises) {
+    const pend = el('span', 'econ-badge bad');
+    pend.textContent = 'seeking premises';
+    pend.title = 'operating from home at reduced capacity until a unit leases';
+    card.appendChild(pend);
+  }
+
   // profit (last tick), coloured ±
   const profit = b.profit ?? 0;
   const pf = el('div', 'econ-biz-profit');
@@ -436,6 +481,36 @@ function bizCard(b: BusinessView): HTMLElement {
     card.appendChild(flag);
   }
   return card;
+}
+
+// one wholesale good: local clearing price, drift vs its base anchor, and the
+// LOCAL-supply shortage bar (imports fill the gap — the bar is the maker-entry
+// signal, not starvation).
+function wholesaleRow(w: WholesaleView): HTMLElement {
+  const row = el('div', 'econ-mkt');
+  const name = el('span', 'econ-mkt-n');
+  name.textContent = w.good;
+  const price = el('span', 'econ-mkt-p');
+  price.textContent = money(w.price ?? 0);
+  price.title = `world price ${money(w.importPrice ?? 0)}`;
+
+  const base = (w.importPrice ?? 0) / 1.1;   // the wholesale anchor
+  const drift = base > 0 ? (w.price - base) / base : 0;
+  const d = el('span', 'econ-mkt-i');
+  d.textContent = signPct(drift, 0);
+  d.style.color = drift > 0.02 ? rgb(BAD_RGB) : drift < -0.02 ? rgb(GOOD_RGB) : '';
+
+  const sh = clamp01(w.shortage ?? 0);
+  const track = el('div', 'econ-mkt-bar');
+  const fill = el('div', 'econ-mkt-bar-f');
+  fill.style.width = `${Math.round(sh * 100)}%`;
+  fill.title = (w.imports ?? 0) > 0.01
+    ? `local shortage ${pct(sh, 0)} — importing ${fmtNum(w.imports)} u/tick`
+    : `local shortage ${pct(sh, 0)}`;
+  track.appendChild(fill);
+
+  row.append(name, price, d, track);
+  return row;
 }
 
 function marketRow(m: MarketView): HTMLElement {
@@ -554,7 +629,7 @@ function eventText(ev: LaborEvent): string {
 function signature(e: EconSnapshot): string {
   const m = e.macro;
   const biz = (e.businesses ?? [])
-    .map((b) => `${b.headcount}/${b.desiredHeadcount}${b.bankrupt ? 'x' : ''}${b.hiring ? '+' : ''}`)
+    .map((b) => `${b.headcount}/${b.desiredHeadcount}${b.bankrupt ? 'x' : ''}${b.hiring ? '+' : ''}${b.pendingPremises ? '?' : ''}`)
     .join(',');
   const evt = e.labor?.recentEvents?.[0]?.t ?? '';
   const dev = e.construction
@@ -562,9 +637,11 @@ function signature(e: EconSnapshot): string {
     : '';
   const sm = e.supermarket ? `${(e.supermarket.fillLevel ?? 0).toFixed(2)}` : '';
   const mon = e.monetary ? `${e.monetary.fed.policyRate.toFixed(4)}:${e.monetary.broadMoney.toFixed(0)}` : '';
+  const ws = (e.wholesale ?? []).map((w) => w.price.toFixed(2)).join(',');
+  const prem = e.premises ? `${e.premises.units}/${e.premises.vacant}/${e.premises.pending}/${e.premises.leases}` : '';
   return (
     `${m.clock | 0}|${(m.boom ?? 0).toFixed(2)}|${(m.cpi ?? 1).toFixed(3)}|` +
-    `${(m.unemployment ?? 0).toFixed(3)}|${biz}|${evt}|${(e.businesses ?? []).length}|${dev}|${sm}|${mon}`
+    `${(m.unemployment ?? 0).toFixed(3)}|${biz}|${evt}|${(e.businesses ?? []).length}|${dev}|${sm}|${mon}|${ws}|${prem}`
   );
 }
 

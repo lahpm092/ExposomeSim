@@ -58,10 +58,12 @@ core  ←  { llm, mind, econ }  ←  world  ←  persist
 - **Owns:** the full probabilistic economy (formerly `src/sim/econ/`):
   `types.ts` (the economy's own shared contract — everything in this module
   imports only from it plus `core/util`), `econsim.ts` (the orchestrator),
-  `wallet.ts`, `business.ts`, `market.ts`, `labor.ts`, `supermarket.ts`,
-  `construction.ts`, `banking.ts`, `fed.ts`, `monetary.ts`, `shadowpop.ts`,
-  `physio.ts`, `history.ts`, `config.ts` — plus `economy.ts` (Mara's legacy
-  per-agent ledger).
+  `wallet.ts`, `business.ts`, `market.ts`, `goods.ts` (wholesale markets),
+  `premises.ts` (commercial real estate), `labor.ts`, `construction.ts`,
+  `banking.ts`, `fed.ts`, `monetary.ts`, `shadowpop.ts`, `physio.ts`,
+  `history.ts`, `config.ts` — plus `economy.ts` (Mara's legacy per-agent
+  ledger). (The old `supermarket.ts` singleton became the 'Meridian Fresh
+  Market' retail firm inside `business.ts`/`config.ts`.)
 - **Entry points:** `EconSim` (`econsim.ts`), `econ/types.ts`, `economy.ts`.
 - **May import from:** `core/`.
 - Knows nothing about minds or the town; the town drives it via `econsim.ts`.

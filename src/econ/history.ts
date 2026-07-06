@@ -56,6 +56,15 @@ export const HIST_FIELDS = [
   'inventory',      // Σ firm finished-goods stock
   'smFill',         // supermarket shelf fill 0..1
   'wealthP10', 'wealthP25', 'wealthP50', 'wealthP75', 'wealthP90',
+  // ---- phase 5 (append-only; old saves zero-fill by name) ----
+  'priceHomegoods', 'priceApparel',
+  'shortHomegoods', 'shortApparel',
+  'wholesaleBakery',   // bakery wholesale clearing price
+  'wholesaleFurniture',
+  'pendingPremises',   // entrants queueing for a commercial unit
+  'commercialUnits',   // total premises units minted
+  'makerCount',
+  'retailCount',
 ] as const;
 
 export type HistField = (typeof HIST_FIELDS)[number];

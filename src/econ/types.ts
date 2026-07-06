@@ -37,11 +37,37 @@ export type AgentId = string;
 export type BusinessId = string;
 
 /** The goods/services sectors that clear on the goods market. Housing is priced
- *  by its own market; labour by the labour market. */
-export type Sector = 'food' | 'groceries' | 'software' | 'utilities' | 'retail';
+ *  by its own market; labour by the labour market. Phase 5 adds two consumer
+ *  DURABLES sectors (homegoods / apparel) served by RETAIL firms off a shelf. */
+export type Sector = 'food' | 'groceries' | 'software' | 'utilities' | 'retail' | 'homegoods' | 'apparel';
 
 /** every sector a business can operate in maps to exactly one product good. */
-export const SECTORS: Sector[] = ['food', 'groceries', 'software', 'utilities', 'retail'];
+export const SECTORS: Sector[] = ['food', 'groceries', 'software', 'utilities', 'retail', 'homegoods', 'apparel'];
+
+/** a fresh all-zero per-sector map (SectorMap literals go stale as sectors grow). */
+export function zeroSectors(): SectorMap {
+  const m = {} as SectorMap;
+  for (const s of SECTORS) m[s] = 0;
+  return m;
+}
+
+// ---------------------------------------------------------------------------
+// 0b. GOODS — the physical products that flow maker → wholesale → retail shelf.
+//   Six map 1:1 onto the supermarket's grocery categories; two are durables.
+//   (The type lives here — the shared contract — so BusinessConfig can carry it;
+//   the WholesaleMarket machinery lives in goods.ts.)
+// ---------------------------------------------------------------------------
+export type GoodId =
+  | 'produce' | 'dairy' | 'bakery' | 'meat' | 'grains' | 'drinks'
+  | 'furniture' | 'apparel';
+
+export const GOODS: GoodId[] = ['produce', 'dairy', 'bakery', 'meat', 'grains', 'drinks', 'furniture', 'apparel'];
+
+/** what a firm IS in the supply chain:
+ *   service — sells its output straight into its sector market (phase ≤4 behaviour);
+ *   maker   — produces a GOOD and sells it into that good's WHOLESALE market;
+ *   retail  — buys goods at wholesale onto a shelf and sells at the sector price. */
+export type BusinessKind = 'service' | 'maker' | 'retail';
 
 // ---------------------------------------------------------------------------
 // 1. WALLET — Tier-A per-agent economic state (side-table, keyed by AgentId).
@@ -96,6 +122,20 @@ export interface BusinessConfig {
   ownerId?: AgentId;
   /** demand-expectation learning rate per sim-hour (heterogeneous across firms). */
   adaptRate?: number;
+  // ---- phase 5: the supply chain -------------------------------------------
+  /** supply-chain role; omitted = 'service' (exactly the phase-4 behaviour). */
+  kind?: BusinessKind;
+  /** makers: the good produced; retail uses SECTOR_GOODS (its whole shelf). */
+  good?: GoodId;
+  /** render-side building archetype ('bakery' | 'butcher' | 'greengrocer' |
+   *  'dairy' | 'furniture' | 'tailor' | 'market2' | 'workshop') — carried as
+   *  data only; the econ never interprets it. */
+  archetype?: string;
+  /** entrants that still need premises start pending (0.4 capacity, from home). */
+  pendingPremises?: boolean;
+  /** retail: the shelf plan (goods stocked, demand share, shelf cap). Omitted ⇒
+   *  the sector's RETAIL_SHELF template. */
+  shelf?: { good: GoodId; share: number; cap: number }[];
 }
 
 export interface BusinessState {
@@ -143,6 +183,14 @@ export interface BusinessView {
   produced: number;           // units produced last tick (COGS paid on these)
   ownerId?: AgentId;          // entrant firms: the founding shadow household
   foundedAt: number;
+  cumRevenue: Money;          // lifetime revenue (supply-chain smoke checks)
+  // phase 5 — the supply chain
+  kind: BusinessKind;
+  good?: GoodId;              // makers: the good produced
+  archetype?: string;         // render-side building archetype (data only)
+  pendingPremises?: boolean;  // entrant waiting for a commercial unit
+  shelfStock?: number;        // retail: Σ units on the shelf
+  shelfCap?: number;          // retail: Σ shelf capacity
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +213,45 @@ export interface MarketView {
   supply: number;
   shortage: number;
   inflation: number;          // price / priceIndexBase - 1
+}
+
+// ---------------------------------------------------------------------------
+// 3b. WHOLESALE — one market per GoodId, upstream of the retail shelf. Makers
+//   sell in; retailers restock out; an external IMPORTER tops up any residual
+//   at a fixed world price (money paid for imports leaks to External, exactly
+//   like raw-material COGS). `shortage` is the LOCAL supply gap — the maker
+//   entry signal — even when imports keep the shelves full.
+// ---------------------------------------------------------------------------
+export interface WholesaleView {
+  good: GoodId;
+  price: Money;               // local clearing price (≤ the import world price)
+  demand: number;             // retailer restock orders last tick (units)
+  supply: number;             // local maker offer last tick (units)
+  shortage: number;           // 0..1 unmet-by-LOCAL-makers fraction
+  imports: number;            // units imported last tick (world-price top-up)
+  importPrice: Money;         // the world-price anchor (~1.1 × base wholesale)
+}
+
+// ---------------------------------------------------------------------------
+// 3c. PREMISES — commercial real estate. Construction completions mint
+//   CommercialUnits; entrant firms lease them (a REAL rent transfer tenant →
+//   owner construction firm each RENT_PERIOD).
+// ---------------------------------------------------------------------------
+export interface CommercialUnit {
+  id: string;
+  buildingId: string;
+  lotId: string;
+  archetype?: string;         // set on lease (fits the building to the tenant)
+  tenantId?: BusinessId;      // undefined = vacant
+  rent: Money;                // per RENT_PERIOD
+  ownerId: BusinessId;        // the construction firm that built (and keeps) it
+}
+
+export interface PremisesView {
+  units: number;              // total commercial units
+  vacant: number;             // unleased units
+  pending: number;            // entrants waiting for premises (operating at 0.4)
+  leases: number;             // cumulative leases signed
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +352,11 @@ export interface ShadowHousehold {
   // phase 4 — the household balance sheet (Minsky channel)
   loan?: Money;               // consumer-credit balance at the household's bank
   lockUntil?: number;         // credit lockout after a default (abs sim-hours)
+  // phase 5 — durables wear (crossing 1 with money on hand ⇒ one discrete purchase)
+  furnWear?: number;          // 0..1+ homegoods wear-and-tear accumulator
+  apparelWear?: number;       // 0..1+ apparel wear accumulator
+  furnRate?: number;          // per-hour wear rate (drawn at ctor, jittered)
+  apparelRate?: number;
 }
 
 /** the consumer-credit primitives the shadow sweep uses (bound to the
@@ -350,7 +442,9 @@ export interface BankView {
 //   housing adds dwellings (→ rent falls), commercial adds sector capacity. The
 //   render reads `buildings` to place/grow meshes; economics read the rest.
 // ---------------------------------------------------------------------------
-export type BuildKind = 'housing' | 'commercial';
+/** 'commercial' is the legacy phase-4 capacity-pad kind (tolerated in old saves);
+ *  new commercial construction is 'shopfront' (2 units) or 'workshop' (1, cheaper). */
+export type BuildKind = 'housing' | 'commercial' | 'shopfront' | 'workshop';
 
 /** an authored empty plot the construction firm can build on (world coords). */
 export interface BuildLot {
@@ -369,10 +463,12 @@ export interface Building {
   complete: boolean;
   cost: Money;               // build cost (loan-financed)
   dwellings: number;         // housing: units of supply added on completion
-  sector?: Sector;           // commercial: which sector it serves
-  capacity: number;          // commercial: units/hr of supply once open
+  sector?: Sector;           // legacy 'commercial': which sector it served
+  capacity: number;          // legacy 'commercial': units/hr of supply once open
   cumIncome: Money;          // rent/lease income to date
   startedAt: number;
+  /** shopfront/workshop: the tenant archetype the render should fit (set on lease). */
+  archetype?: string;
 }
 
 export interface ConstructionView {
@@ -494,10 +590,14 @@ export interface EconSnapshot {
   shadow: ShadowPopView;
   agents: AgentEconView[];    // Tier-A only, keyed order matches society roster
   bank?: BankView;
-  construction?: ConstructionView;
+  construction?: ConstructionView;   // legacy merged view (Σ of both builders)
   supermarket?: SupermarketView;
   monetary?: MonetaryView;
   history?: EconHistoryView;  // the full-run time series for the Observatory
+  // phase 5 — the supply chain
+  wholesale?: WholesaleView[];
+  premises?: PremisesView;
+  builders?: ConstructionView[];     // both construction firms, individually
 }
 
 // ---------------------------------------------------------------------------

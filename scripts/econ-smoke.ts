@@ -19,6 +19,10 @@ let sampled = false;
 let maxCredit = 0, maxConsErr = 0, minRate = 1, maxRate = 0, banksSolvent = true;
 // phase 4 tracking (emergence expansions)
 let maxConsumerDebt = 0, maxDepInt = 0, maxInventory = 0;
+// phase 5 tracking (supply chains · premises · dual construction)
+let makerRevTick = 0, makerCumRev = 0, durablesSold = 0;
+let maxPending = 0, wsBandOk = true;
+let uLateSum = 0, uLateN = 0;
 
 for (let i = 0; i < STEPS; i++) {
   town.update(dtReal);
@@ -37,7 +41,22 @@ for (let i = 0; i < STEPS; i++) {
     if (b.bankrupt) anyBankrupt = true;
     if (startHead[b.id] !== undefined && b.headcount !== startHead[b.id]) headcountChanged = true;
     maxInventory = Math.max(maxInventory, b.inventory);
+    if (b.kind === 'maker') {
+      makerRevTick = Math.max(makerRevTick, b.revenue);
+      makerCumRev = Math.max(makerCumRev, b.cumRevenue);
+    }
   }
+  for (const mk of e.markets) {
+    if (mk.sector === 'homegoods' || mk.sector === 'apparel') {
+      durablesSold = Math.max(durablesSold, Math.min(mk.demand, mk.supply));
+    }
+  }
+  if (e.premises) maxPending = Math.max(maxPending, e.premises.pending);
+  for (const w of e.wholesale ?? []) {
+    // wholesale must sit between the world's raw-input floor and the retail sticker
+    if (w.price > w.importPrice + 1e-9 || w.price <= 0) wsBandOk = false;
+  }
+  if (m.clock > 30 * 24) { uLateSum += m.unemployment; uLateN++; }
   for (const ev of e.labor.recentEvents) seenKinds.add(ev.kind);
   maxConsumerDebt = Math.max(maxConsumerDebt, e.shadow.consumerDebt);
   const mon = e.monetary;
@@ -131,6 +150,31 @@ pass = ok('deposit interest was paid to savers', maxDepInt > 0) && pass;
 pass = ok('a worker QUIT for a better wage (job ladder)', seenKinds.has('quit')) && pass;
 pass = ok('firms carried inventory (Metzler)', maxInventory > 0) && pass;
 pass = ok('gini spans the whole population', e.macro.gini > 0 && e.macro.gini < 1) && pass;
+
+// --- phase 5: goods supply chains · premises · dual construction ---
+const pv = e.premises!;
+const builders = e.builders ?? [];
+const wsBakery = e.wholesale?.find((w) => w.good === 'bakery');
+const grocer = e.businesses.find((b) => b.id === 'biz-market');
+const makersAlive = e.businesses.filter((b) => b.kind === 'maker' && !b.bankrupt);
+const uLate = uLateN > 0 ? uLateSum / uLateN : e.macro.unemployment;
+console.log(`  (supply chain: maker rev/tick max $${makerRevTick.toFixed(1)} · cumRev max $${makerCumRev.toFixed(0)}` +
+  ` · durables sold max ${durablesSold.toFixed(1)}/tick · ws bakery $${wsBakery?.price.toFixed(2)}` +
+  ` | premises ${pv.units}u/${pv.vacant}v · maxPending ${maxPending} · ${pv.leases} leases` +
+  ` | builders ${builders.map((b) => `${b.name.split(' ')[0]} ${b.completedBuildings}`).join(' · ')}` +
+  ` | u(d30+) ${(uLate * 100).toFixed(1)}%)`);
+pass = ok('wholesale cleared with maker revenue', makerRevTick > 0 && makerCumRev > 0) && pass;
+pass = ok('a retailer restocked from wholesale (maker cumRevenue > 0)', makerCumRev > 0 && (grocer?.cumRevenue ?? 0) > 0) && pass;
+pass = ok('a durable was purchased (homegoods/apparel sold)', durablesSold > 0) && pass;
+pass = ok('premises pipeline ran (pending queued or a lease signed)', maxPending > 0 || pv.leases > 0) && pass;
+pass = ok('both construction firms built (≥1 new each, seeds excluded)',
+  (builders.length === 2 && builders.every((b) => b.completedBuildings >= 2))
+  || builders.reduce((s, b) => s + b.completedBuildings, 0) >= 3) && pass;
+pass = ok('wholesale prices within the raw-cost..import band', wsBandOk) && pass;
+pass = ok('CPI within [0.6, 1.4]', e.macro.cpi >= 0.6 && e.macro.cpi <= 1.4) && pass;
+pass = ok('unemployment settled in [4%, 16%] (post-day-30 mean)', uLate >= 0.04 && uLate <= 0.16) && pass;
+pass = ok('the grocery retailer stayed solvent 70 days', !!grocer && !grocer.bankrupt) && pass;
+pass = ok('at least one maker stayed solvent 70 days', makersAlive.length >= 1) && pass;
 
 // --- the Observatory's history (t0 → now, bounded, monotonic) ---
 const h = e.history!;

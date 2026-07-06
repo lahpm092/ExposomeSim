@@ -42,13 +42,21 @@ export class GoodsMarket {
    * scaled by how lopsided the market is. `+1e-6` keeps a dead (0/0) market
    * quiet; the price is clamped to a plausible band so a runaway shortage or
    * glut can't send it to zero or the moon. Caches + returns the cleared trade.
+   *
+   * `discover = false` marks a DORMANT market (no seller alive in the sector):
+   * tâtonnement needs traders on both sides, so the price freezes at its last
+   * level while demand + shortage keep recording — the shortage EMA still
+   * screams for entry, but a shop-less durables sector can't hyperinflate a
+   * price nobody is charging.
    */
-  clear(demandUnits: number, supplyUnits: number): { price: Money; sold: number; shortage: number } {
-    const excess = (demandUnits - supplyUnits) / (demandUnits + supplyUnits + 1e-6);
-    // ceiling 5× base: with firm exit possible, a briefly supplier-less sector
-    // pins at the ceiling until an entrant arrives — 5× reads as a crisis price
-    // without torching the CPI series the way 8× did.
-    this._price = clamp(this._price + PRICE_ADJ * this._price * excess, 0.2 * this._base, 5 * this._base);
+  clear(demandUnits: number, supplyUnits: number, discover = true): { price: Money; sold: number; shortage: number } {
+    if (discover) {
+      const excess = (demandUnits - supplyUnits) / (demandUnits + supplyUnits + 1e-6);
+      // ceiling 5× base: with firm exit possible, a briefly supplier-less sector
+      // pins at the ceiling until an entrant arrives — 5× reads as a crisis price
+      // without torching the CPI series the way 8× did.
+      this._price = clamp(this._price + PRICE_ADJ * this._price * excess, 0.2 * this._base, 5 * this._base);
+    }
     this._demand = demandUnits;
     this._supply = supplyUnits;
     this._sold = Math.min(demandUnits, supplyUnits);

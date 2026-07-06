@@ -30,6 +30,7 @@ import {
   SKILL_GROWTH, SHADOW_SEED_MONEY, TRAIN_SKILL_GROWTH, WATER_UNIT_PRICE,
   CC_TRIGGER, CC_CHUNK, CC_COMFORT, CC_REPAY_K, CC_LIMIT_WEEKS,
   CC_DEFAULT_MONEY, CC_LOCK_HOURS, FEAR_U0, FEAR_K, FEAR_CUT,
+  FURN_PERIOD_H, APPAREL_PERIOD_H, DURABLE_COMFORT,
 } from './config';
 import { clamp, mulberry32, type RNG } from '../core/util/num';
 
@@ -51,13 +52,17 @@ const RETAIL_SCALE = 2.0;
 const RETAIL_REF = 3.6;
 
 /** per-sector reference prices for the constant-elasticity demand curve. Software
- *  is B2B — households never buy it, so its ref is inert. */
+ *  is B2B — households never buy it, so its ref is inert. Homegoods/apparel are
+ *  DURABLES: demand comes off the wear accumulators (discrete purchases, budget-
+ *  gated), so their refs are inert too — kept for map totality. */
 const REF: SectorMap = {
   food: FOOD_UNIT_PRICE,
   groceries: GROCERY_UNIT_PRICE,
   software: 240,
   utilities: WATER_UNIT_PRICE,
   retail: RETAIL_REF,
+  homegoods: 6.0,
+  apparel: 7.0,
 };
 
 /** clamp the elastic multiplier so a near-zero price can't blow demand up nor a
@@ -128,7 +133,7 @@ export class ShadowPop {
   private lastDefaults = 0;
 
   /** demand accumulator, reused across steps (zeroed in place — no allocation). */
-  private _demand: SectorMap = { food: 0, groceries: 0, software: 0, utilities: 0, retail: 0 };
+  private _demand: SectorMap = { food: 0, groceries: 0, software: 0, utilities: 0, retail: 0, homegoods: 0, apparel: 0 };
   private _aggDemand = 0;
 
   /**
@@ -182,6 +187,12 @@ export class ShadowPop {
         missedRent: 0,
         loan: 0,
         lockUntil: 0,
+        // durables: wear starts uniformly spread (purchases stagger from t0);
+        // per-household wear RATES are jittered lognormal-ish around the mean.
+        furnWear: r(),
+        apparelWear: r(),
+        furnRate: (1 / FURN_PERIOD_H) * (0.6 + 0.8 * r()),
+        apparelRate: (1 / APPAREL_PERIOD_H) * (0.6 + 0.8 * r()),
       };
 
       // stagger the weekly rent charge across the period via a cheap id hash so
@@ -233,6 +244,9 @@ export class ShadowPop {
     // zero the demand accumulator in place (households never buy software).
     const D = this._demand;
     D.food = 0; D.groceries = 0; D.software = 0; D.utilities = 0; D.retail = 0;
+    D.homegoods = 0; D.apparel = 0;
+    const pFurn = prices.homegoods;
+    const pApp = prices.apparel;
 
     const hh = this.hh;
     const dueAt = this.rentDueAt;
@@ -285,6 +299,30 @@ export class ShadowPop {
       // debit the basket at current market prices.
       h.money -= qFood * prices.food + qGro * prices.groceries
         + qUtil * prices.utilities + qRet * prices.retail;
+
+      // ---- durables wear (phase 5): wear grows with time; crossing 1 with
+      // money above a comfort floor ⇒ ONE discrete purchase (a demand unit) at
+      // the retail price, then a jittered reset. Broke households defer at the
+      // saturated wear level and buy the moment they can — emergent elasticity.
+      // the comfort floor scales 2× with the price: dear durables get deferred
+      // by the less-comfortable — the demand elasticity that stops a stockout
+      // blip from ratcheting the retail price without limit.
+      const fw = (h.furnWear ?? 0) + (h.furnRate ?? 1 / FURN_PERIOD_H) * dt;
+      if (fw >= 1) {
+        if (h.money > DURABLE_COMFORT + 2 * pFurn) {
+          D.homegoods += 1;
+          h.money -= pFurn;
+          h.furnWear = 0.1 * rng();
+        } else h.furnWear = 1;
+      } else h.furnWear = fw;
+      const aw = (h.apparelWear ?? 0) + (h.apparelRate ?? 1 / APPAREL_PERIOD_H) * dt;
+      if (aw >= 1) {
+        if (h.money > DURABLE_COMFORT + 2 * pApp) {
+          D.apparel += 1;
+          h.money -= pApp;
+          h.apparelWear = 0.1 * rng();
+        } else h.apparelWear = 1;
+      } else h.apparelWear = aw;
 
       // ---- rent / eviction -------------------------------------------------
       if (!h.homeless) {
@@ -339,7 +377,7 @@ export class ShadowPop {
       if (h.money < MONEY_FLOOR) h.money = MONEY_FLOOR;
     }
 
-    this._aggDemand = D.food + D.groceries + D.utilities + D.retail;
+    this._aggDemand = D.food + D.groceries + D.utilities + D.retail + D.homegoods + D.apparel;
   }
 
   // ---------------------------------------------------------------------------
@@ -349,7 +387,11 @@ export class ShadowPop {
   /** aggregate consumption UNITS per sector from the last step() (fresh copy). */
   demand(): SectorMap {
     const d = this._demand;
-    return { food: d.food, groceries: d.groceries, software: d.software, utilities: d.utilities, retail: d.retail };
+    return {
+      food: d.food, groceries: d.groceries, software: d.software,
+      utilities: d.utilities, retail: d.retail,
+      homegoods: d.homegoods, apparel: d.apparel,
+    };
   }
 
   /** every household as a job-seeker; the orchestrator filters the unemployed. */
@@ -516,8 +558,22 @@ export class ShadowPop {
     if (typeof o.seed === 'number') this.seed = o.seed >>> 0;
     if (Array.isArray(o.hh)) {
       this.hh = o.hh;
-      // v1 saves predate the balance-sheet fields — normalize them in.
-      for (const h of this.hh) { h.loan = h.loan ?? 0; h.lockUntil = h.lockUntil ?? 0; }
+      // v1 saves predate the balance-sheet fields — normalize them in. Pre-
+      // phase-5 saves lack the durable-wear fields: derive them DETERMINISTICALLY
+      // from the household index (a cheap hash, no rng spend) so an old save
+      // stays byte-stable and durables demand simply fades in.
+      for (let i = 0; i < this.hh.length; i++) {
+        const h = this.hh[i];
+        h.loan = h.loan ?? 0; h.lockUntil = h.lockUntil ?? 0;
+        if (typeof h.furnWear !== 'number') {
+          const f1 = ((Math.imul(i + 1, 2654435761) >>> 0) % 1000) / 1000;
+          const f2 = ((Math.imul(i + 7, 40503) >>> 0) % 1000) / 1000;
+          h.furnWear = f1;
+          h.apparelWear = f2;
+          h.furnRate = (1 / FURN_PERIOD_H) * (0.6 + 0.8 * f2);
+          h.apparelRate = (1 / APPAREL_PERIOD_H) * (0.6 + 0.8 * f1);
+        }
+      }
     }
     if (typeof o.defaults === 'number') this.defaultsCum = o.defaults;
     if (Array.isArray(o.rentDueAt)) this.rentDueAt = o.rentDueAt;
@@ -525,7 +581,11 @@ export class ShadowPop {
     else if (Array.isArray(o.hh)) this.chronic = new Array(o.hh.length).fill(false);
     if (o.demand) {
       const d = o.demand;
-      this._demand = { food: d.food, groceries: d.groceries, software: d.software, utilities: d.utilities, retail: d.retail };
+      this._demand = {
+        food: d.food ?? 0, groceries: d.groceries ?? 0, software: d.software ?? 0,
+        utilities: d.utilities ?? 0, retail: d.retail ?? 0,
+        homegoods: d.homegoods ?? 0, apparel: d.apparel ?? 0,
+      };
     }
     if (typeof o.agg === 'number') this._aggDemand = o.agg;
     if (this.rng.load && typeof o.rng === 'number') this.rng.load(o.rng);
