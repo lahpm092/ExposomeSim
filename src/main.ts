@@ -11,6 +11,7 @@ import { BrainPanel } from './render/brain';
 import { CityView } from './render/cityview';
 import { PsychePanel } from './render/psycheviz';
 import { MemoryPanel } from './render/memoryviz';
+import { EconViz } from './render/econviz';
 import { SkyClock } from './render/skyclock';
 import { TownPanel } from './ui/townpanel';
 import { Dashboard } from './ui/dashboard';
@@ -69,15 +70,17 @@ async function boot() {
   const city = new CityView(stageEl, titlebar);
   const psyche = new PsychePanel(stageEl, titlebar);
   const memory = new MemoryPanel(stageEl, titlebar);
+  const econViz = new EconViz(stageEl, titlebar);
   const skyclock = new SkyClock(stageEl, titlebar);
 
-  addEventListener('resize', () => { stage.resize(); brain.resize(); city.resize(); psyche.resize(); memory.resize(); skyclock.resize(); });
+  addEventListener('resize', () => { stage.resize(); brain.resize(); city.resize(); psyche.resize(); memory.resize(); econViz.resize(); skyclock.resize(); });
   addEventListener('keydown', (e) => {
     const town = session.town;
     if (e.code === 'Space') { e.preventDefault(); town.togglePause(); }
     else if (e.key === '+' || e.key === '=') town.setSpeed(Math.min(0.6, town.speed * 1.5));
     else if (e.key === '-') town.setSpeed(Math.max(0.002, town.speed / 1.5));
     else if (e.key === 'c' || e.key === 'C') city.toggle();
+    else if (e.key === 'e' || e.key === 'E') econViz.toggle();
     else if ((e.key === 's' || e.key === 'S') && (e.metaKey || e.ctrlKey)) { e.preventDefault(); session.save(); branchBar.render(true); }
     else if (e.key === 'b' || e.key === 'B') { session.branch(); branchBar.render(true); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); brain.selectPrev(); }
@@ -99,6 +102,7 @@ async function boot() {
     city.update(snap, dtReal);
     psyche.update(snap, dtReal);
     memory.update(snap, dtReal);
+    econViz.update(snap, dtReal);
     skyclock.update(snap);
     branchBar.render();
     session.autosaveTick(dtReal);
@@ -108,7 +112,7 @@ async function boot() {
 
   // debug/verification hook: drive the whole frame loop deterministically even
   // when the tab is backgrounded (requestAnimationFrame is throttled while hidden).
-  const dbg: any = { session, stage, brain, psyche, memory, skyclock, branchBar, tick };
+  const dbg: any = { session, stage, brain, psyche, memory, econViz, skyclock, branchBar, tick };
   Object.defineProperty(dbg, 'town', { get: () => session.town });
   (window as any).__dbg = dbg;
 

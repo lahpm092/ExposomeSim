@@ -144,8 +144,11 @@ background tabs, which nearly freezes the sim.
 **Controls**
 - **Drag** the 3D view to orbit the camera around Mara · **wheel** to zoom.
 - **space** pause · **+ / −** sim speed.
-- Titlebar toggles: **BRAIN** (anatomical brain) · **CITY** (2D density map) · **PSYCHE**
-  (live psyche-vector signature) · **MEMORY** (symbolic memory graph).
+- Titlebar toggles: **BRAIN** (anatomical brain) · **CITY** (2D density map, `c`) · **PSYCHE**
+  (live psyche-vector signature) · **MEMORY** (symbolic memory graph) · **ECON** (`e`, the
+  **Economy Observatory** — the whole macro history t0→now: output/prices/rates/money/labour/
+  firm demography/wealth/housing strips, the Phillips phase trail, the event lane, and the
+  live now-board; see `ECONOMY_EMERGENCE.md`).
 - In the brain panel: **LIVE** toggles activation-glow vs. static inspect · **↑/↓** step the
   soma vector to light the responsible structure(s).
 

@@ -15,7 +15,11 @@ import type {
   AgentId, BusinessConfig, BusinessId, BusinessState, BusinessView,
   MacroAggregates, Money, Sector,
 } from './types';
-import { RENT_PERIOD, MIN_WAGE, WAGE_ADJ } from './config';
+import {
+  RENT_PERIOD, MIN_WAGE, WAGE_ADJ,
+  EXP_ADAPT, INV_BUFFER, INV_CORRECT, INV_CORRECT_CAP, INV_TARGET_H, INV_KEEP_H,
+  RATE_SENS, RATE_NEUTRAL,
+} from './config';
 import { clamp } from '../../util/num';
 
 // ---- tuning ----------------------------------------------------------------
@@ -38,6 +42,8 @@ export class Business {
   readonly id: BusinessId;
   readonly name: string;
   readonly sector: Sector;
+  readonly anchor: boolean;            // never removed (town infrastructure)
+  readonly ownerId?: AgentId;          // entrant firms: founding household (dividends)
 
   // ---- immutable config (identity + economics; rebuilt by the ctor) ----------
   private readonly _seedCash: Money;
@@ -47,6 +53,7 @@ export class Business {
   private readonly _baseWage: Money;
   private readonly _commercialRent: Money;
   private readonly _maxHeadcount: number;
+  private readonly _adapt: number;     // demand-expectation learning rate /h
 
   // ---- live state ------------------------------------------------------------
   private _cash: Money;
@@ -58,6 +65,12 @@ export class Business {
   private _workers: AgentId[] = [];
   private _rentDueAt: number;
   private readonly _foundedAt: number;
+  private _restructuredAt = -1e9;      // anchor-firm bailout cooldown
+  // phase 4 — expectations + inventory (Metzler). expRate < 0 = "no data yet":
+  // produce at capacity until the first sale teaches the firm its demand.
+  private _expRate = -1;                  // adaptive expected demand, units/sim-hour
+  private _inventory = 0;                 // finished storable goods on the shelf
+  private _lastOffer = 0;                 // units offered to the market this tick
 
   // ---- per-tick accumulators (zeroed by settle) ------------------------------
   private _revenueAcc = 0;
@@ -65,6 +78,7 @@ export class Business {
   private _payrollAcc = 0;
   private _rentAcc = 0;
   private _unitsSoldAcc = 0;
+  private _producedAcc = 0;
 
   // ---- last-tick readouts (what view()/state() report) -----------------------
   private _lastRevenue = 0;
@@ -73,6 +87,7 @@ export class Business {
   private _lastRent = 0;
   private _lastUnitsSold = 0;
   private _lastProfit = 0;
+  private _lastProduced = 0;
 
   // ---- cumulative dashboard totals -------------------------------------------
   private _cumRevenue = 0;
@@ -82,6 +97,8 @@ export class Business {
     this.id = cfg.id;
     this.name = cfg.name;
     this.sector = cfg.sector;
+    this.anchor = cfg.anchor ?? false;
+    this.ownerId = cfg.ownerId;
     this._seedCash = cfg.seedCash;
     this._basePrice = cfg.basePrice;
     this._unitCost = cfg.unitCost;
@@ -89,6 +106,7 @@ export class Business {
     this._baseWage = cfg.baseWage;
     this._commercialRent = cfg.commercialRent;
     this._maxHeadcount = cfg.maxHeadcount;
+    this._adapt = cfg.adaptRate ?? EXP_ADAPT;
 
     this._cash = cfg.seedCash;
     this._price = cfg.basePrice;
@@ -126,17 +144,68 @@ export class Business {
   }
 
   // ---- accounting hooks (accumulate into the CURRENT tick) -------------------
-  /** Sell `units` at the market-transacted `price`. Revenue and COGS accrue for
-   *  the tick's profit; cash moves only by the margin (the orchestrator has
-   *  already collected the gross from buyers, so we bank net-of-COGS here). */
-  bookSales(units: number, price: Money): void {
-    if (units <= 0) return;
-    const revenue = units * price;
-    const cogs = units * this._unitCost;
-    this._revenueAcc += revenue;
+  /**
+   * PRODUCE for this tick (Metzler): plan output from the adaptive demand
+   * expectation plus an inventory-gap correction, capped by capacity. COGS is
+   * paid on PRODUCTION, not sales — overproducing hurts, so expectation errors
+   * have teeth and the inventory cycle can emerge. Returns the units OFFERED
+   * to the market (fresh production + shelf stock).
+   */
+  produce(dt: number): number {
+    const capT = this.capacity() * dt;
+    const rate = this._expRate;
+    let planned: number;
+    if (rate < 0) {
+      planned = capT;                    // no data yet → the old always-full behaviour
+    } else {
+      const targetInv = INV_TARGET_H[this.sector] * rate;
+      const corr = clamp((targetInv - this._inventory) * INV_CORRECT,
+        -INV_CORRECT_CAP * rate * dt, INV_CORRECT_CAP * rate * dt);
+      planned = rate * dt * (1 + INV_BUFFER) + corr;
+    }
+    // PROFITABILITY GATE: no firm keeps producing flat-out at a price below its
+    // MARGINAL COST — materials plus the labour a unit takes — it withholds
+    // supply instead, which starves the market until tâtonnement lifts the
+    // price back over cost. This is the supply-side price floor that (a) keeps
+    // a startup glut from freezing into permanent sell-below-cost deflation and
+    // (b) anchors each sector's price near real cost + a thin margin.
+    const marginalCost = this._unitCost + (this._capacityPerWorker > 0 ? this._wage / this._capacityPerWorker : 0);
+    const floorPrice = marginalCost * 1.05;
+    if (this._price < floorPrice && this._price > 0) {
+      planned *= clamp(Math.pow(this._price / floorPrice, 2), 0.15, 1);
+    }
+    const production = clamp(planned, 0, capT);
+    const cogs = production * this._unitCost;
     this._cogsAcc += cogs;
-    this._cash += revenue - cogs;
-    this._unitsSoldAcc += units;
+    this._cash -= cogs;
+    this._producedAcc += production;
+    this._lastOffer = production + this._inventory;
+    return this._lastOffer;
+  }
+
+  /** the units this firm put on the market this tick (its slice of sector supply). */
+  get lastOffer(): number { return this._lastOffer; }
+
+  /**
+   * Settle this tick's SALES: bank the gross revenue (buyers already paid the
+   * orchestrator), roll unsold output into inventory (perishables decay), and
+   * update the adaptive demand expectation from the demand this firm actually
+   * saw. dt-invariant: λ_eff = 1 − (1−λ)^dt.
+   */
+  sellAllocated(units: number, price: Money, demandSeen: number, dt: number): void {
+    if (units > 0) {
+      this._revenueAcc += units * price;
+      this._cash += units * price;
+      this._unitsSoldAcc += units;
+    }
+    this._price = price > 0 ? price : 0;
+    const leftover = Math.max(0, this._lastOffer - Math.max(0, units));
+    this._inventory = leftover * Math.pow(INV_KEEP_H[this.sector], Math.max(dt, 0));
+    if (dt > 1e-9) {
+      const seen = Math.max(0, demandSeen) / dt;
+      const lam = 1 - Math.pow(1 - clamp(this._adapt, 0.02, 0.9), dt);
+      this._expRate = this._expRate < 0 ? seen : this._expRate + lam * (seen - this._expRate);
+    }
   }
 
   /** Book a payroll disbursement this tick (the orchestrator pays the wallets). */
@@ -165,13 +234,17 @@ export class Business {
   // Grow when we made money AND ran near capacity (demand we could have served);
   // shrink when we bled. Wage bids up when we want more hands than we have, and
   // drifts toward the floor when we are shedding. A boom is a mild tailwind: it
-  // lowers the utilisation bar that justifies a hire; a bust raises it.
-  decide(macro: MacroAggregates): void {
+  // lowers the utilisation bar that justifies a hire; a bust raises it. DEAR
+  // MONEY is a headwind: when the lending rate sits above neutral, expanding
+  // payroll on a working-capital line costs real interest, so the bar rises —
+  // this is where the Fed's rate reaches the real economy.
+  decide(macro: MacroAggregates, lendingRate = RATE_NEUTRAL): void {
     const hc = this.headcount();
     const cap = this.capacity();
     const util = cap > 0 ? clamp(this._lastUnitsSold / cap, 0, 1) : 0;
     const boom = clamp(macro.boom, -1, 1);
-    const growBar = clamp(GROW_UTIL - BOOM_TAILWIND * boom, 0.5, 0.95);
+    const rateDrag = RATE_SENS * Math.max(0, lendingRate - RATE_NEUTRAL);
+    const growBar = clamp(GROW_UTIL - BOOM_TAILWIND * boom + rateDrag, 0.5, 0.98);
 
     let desired = hc;
     if (this._lastProfit > 0 && util >= growBar) {
@@ -204,6 +277,7 @@ export class Business {
     this._lastRent = this._rentAcc;
     this._lastUnitsSold = this._unitsSoldAcc;
     this._lastProfit = profit;
+    this._lastProduced = this._producedAcc;
 
     this._cumRevenue += this._revenueAcc;
     this._cumProfit += profit;
@@ -215,11 +289,12 @@ export class Business {
     const solvency = clamp((this._cash - ruin) / (this._seedCash - ruin), 0, 1);
     this._health = clamp(solvency + (profit >= 0 ? IDLE_HEALTH : -LOSS_HEALTH), 0, 1);
 
-    // Insolvency latch: once ruined, stay ruined.
+    // Insolvency latch: once ruined, stay ruined. (Non-anchor firms are then
+    // dissolved by the orchestrator; anchor firms get restructured instead.)
     if (this._cash < ruin || this._health <= 0) this._bankrupt = true;
 
     this._revenueAcc = 0; this._cogsAcc = 0; this._payrollAcc = 0;
-    this._rentAcc = 0; this._unitsSoldAcc = 0;
+    this._rentAcc = 0; this._unitsSoldAcc = 0; this._producedAcc = 0;
   }
 
   // ---- readouts --------------------------------------------------------------
@@ -235,6 +310,11 @@ export class Business {
       health: this._health,
       bankrupt: this._bankrupt,
       hiring: this._desiredHeadcount > this._workers.length && !this._bankrupt,
+      inventory: this._inventory,
+      expDemand: Math.max(0, this._expRate),
+      produced: this._lastProduced,
+      ownerId: this.ownerId,
+      foundedAt: this._foundedAt,
     };
   }
 
@@ -259,6 +339,23 @@ export class Business {
   /** the skill floor this firm hires above (0 = anyone; software is selective). */
   minSkillBar(): number { return SKILL_BAR[this.sector]; }
 
+  /** RESTRUCTURE a bankrupt ANCHOR firm (town infrastructure can't dissolve):
+   *  an outside equity injection resets a lean, chastened balance sheet. The
+   *  orchestrator writes off its bank debt first (that loss is real). Returns
+   *  false while the post-restructure cooldown holds (then it just sits idle). */
+  restructure(clock: number): boolean {
+    if (clock - this._restructuredAt < 24 * 14) return false;
+    this._restructuredAt = clock;
+    this._bankrupt = false;
+    this._health = 0.3;
+    this._cash = Math.max(this._cash, 0.25 * this._seedCash);
+    this._desiredHeadcount = 1;
+    this._wage = Math.max(MIN_WAGE, this._baseWage * 0.9);
+    this._expRate = -1;                 // relearn demand from scratch
+    this._inventory = 0;
+    return true;
+  }
+
   // ---- persistence (identity/config rebuilt by the ctor; state overwritten) --
   toJSON(): unknown {
     const j: BusinessJSON = {
@@ -273,6 +370,8 @@ export class Business {
       lastPayroll: this._lastPayroll, lastRent: this._lastRent,
       lastUnitsSold: this._lastUnitsSold, lastProfit: this._lastProfit,
       cumRevenue: this._cumRevenue, cumProfit: this._cumProfit,
+      expRate: this._expRate, inventory: this._inventory,
+      restructuredAt: this._restructuredAt,
     };
     return j;
   }
@@ -290,6 +389,9 @@ export class Business {
     this._lastPayroll = s.lastPayroll; this._lastRent = s.lastRent;
     this._lastUnitsSold = s.lastUnitsSold; this._lastProfit = s.lastProfit;
     this._cumRevenue = s.cumRevenue; this._cumProfit = s.cumProfit;
+    this._expRate = typeof s.expRate === 'number' ? s.expRate : -1;
+    this._inventory = typeof s.inventory === 'number' ? s.inventory : 0;
+    this._restructuredAt = typeof s.restructuredAt === 'number' ? s.restructuredAt : -1e9;
   }
 }
 
@@ -303,4 +405,5 @@ export interface BusinessJSON {
   lastRevenue: number; lastCogs: number; lastPayroll: number;
   lastRent: number; lastUnitsSold: number; lastProfit: number;
   cumRevenue: number; cumProfit: number;
+  expRate?: number; inventory?: number; restructuredAt?: number;
 }

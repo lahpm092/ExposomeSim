@@ -21,13 +21,15 @@
 // =============================================================================
 
 import type {
-  AgentId, BusinessId, LaborCandidate, MacroAggregates,
+  AgentId, BusinessId, ConsumerCredit, LaborCandidate, MacroAggregates,
   Money, SectorMap, ShadowHousehold, ShadowPopView,
 } from './types';
 import {
   BASE_WAGE, DEMAND_ELASTICITY, EVICT_MISSED_PERIODS, FOOD_UNIT_PRICE,
   GROCERY_UNIT_PRICE, MEALS_PER_DAY, MIN_WAGE, RENT_PERIOD, RUIN_MONEY,
   SKILL_GROWTH, SHADOW_SEED_MONEY, TRAIN_SKILL_GROWTH, WATER_UNIT_PRICE,
+  CC_TRIGGER, CC_CHUNK, CC_COMFORT, CC_REPAY_K, CC_LIMIT_WEEKS,
+  CC_DEFAULT_MONEY, CC_LOCK_HOURS, FEAR_U0, FEAR_K, FEAR_CUT,
 } from './config';
 import { clamp, mulberry32, type RNG } from '../../util/num';
 
@@ -121,6 +123,9 @@ export class ShadowPop {
   private chronic: boolean[] = [];
   private rng: RNG;
   private seed: number;
+  /** consumer-credit defaults — cumulative and last-tick (for events/history). */
+  private defaultsCum = 0;
+  private lastDefaults = 0;
 
   /** demand accumulator, reused across steps (zeroed in place — no allocation). */
   private _demand: SectorMap = { food: 0, groceries: 0, software: 0, utilities: 0, retail: 0 };
@@ -175,6 +180,8 @@ export class ShadowPop {
         consumeGroceries,
         propensityToConsume,
         missedRent: 0,
+        loan: 0,
+        lockUntil: 0,
       };
 
       // stagger the weekly rent charge across the period via a cheap id hash so
@@ -192,15 +199,29 @@ export class ShadowPop {
     macro: MacroAggregates,
     prices: SectorMap,
     rent: Money,
+    credit: ConsumerCredit | null = null,
   ): void {
     const dt = ctx.dtHours;
     const dtDay = dt / 24;                 // per-day baselines → this tick
     const clock = ctx.clock;
     const rng = this.rng;                  // internal, serialized stream (see header)
+    this.lastDefaults = 0;
 
     // Booms loosen wallets, busts tighten them — confidence rides the cycle and
     // only touches discretionary (retail) spend.
     const confidence = clamp(1 + CONFIDENCE_K * macro.boom, 0.6, 1.4);
+
+    // PRECAUTIONARY SAVING: as unemployment climbs past its natural rate, every
+    // household trims discretionary spend — the jobless hardest. This is the
+    // classic demand amplifier (fear of the slump deepens the slump).
+    const fear = clamp(FEAR_K * (macro.unemployment - FEAR_U0), 0, 1);
+    const precautionEmp = 1 - FEAR_CUT * fear * 0.6;
+    const precautionJobless = 1 - FEAR_CUT * fear;
+
+    // Re-employment wages INDEX partially to the price level, so inflation can
+    // pass through into nominal wages (the wage-price spiral becomes possible —
+    // the half-weight pivot + tight clamp keep it a spiral, not a rocket).
+    const wageIndex = clamp(0.5 + 0.5 * macro.cpi, 0.85, 1.5);
 
     // Price elasticity is identical for every household, so resolve the per-sector
     // demand multipliers ONCE; the per-household sweep is then pure multiply-add.
@@ -233,14 +254,16 @@ export class ShadowPop {
       // ---- wider-economy labour churn (jobs outside our 5 firms) -----------
       // Only households NOT holding one of our modelled firm jobs (employer===null)
       // churn here; a procyclical hire hazard keeps unemployment near its natural
-      // rate instead of collapsing onto the few slots we simulate.
+      // rate instead of collapsing onto the few slots we simulate. Homelessness
+      // halves the hire hazard — the poverty trap is real (hysteresis).
       if (h.employer === null) {
         if (h.employed) {
           if (rng() < SEP_HAZARD * dt) { h.employed = false; h.wage = 0; }
-        } else if (!this.chronic[i] && rng() < HIRE_HAZARD * (0.35 + h.skill) * (1 + 0.6 * macro.boom) * dt) {
+        } else if (!this.chronic[i]
+          && rng() < HIRE_HAZARD * (0.35 + h.skill) * (1 + 0.6 * macro.boom) * (h.homeless ? 0.45 : 1) * dt) {
           // re-employment is skill-gated: the least-skilled wait longest for work.
           h.employed = true;
-          h.wage = Math.max(MIN_WAGE, BASE_WAGE * (0.6 + h.skill * 0.8));
+          h.wage = Math.max(MIN_WAGE, BASE_WAGE * (0.6 + h.skill * 0.8) * wageIndex);
         }
       }
 
@@ -249,7 +272,8 @@ export class ShadowPop {
       // can't run away and the poor visibly cut back (demand sags in a slump).
       const budget = h.money <= BROKE_LINE ? BROKE_BUDGET : 1;
       const utilBase = h.consumeFood * UTIL_RATIO;              // size proxy
-      const retBase = h.propensityToConsume * RETAIL_SCALE * budget;
+      const retBase = h.propensityToConsume * RETAIL_SCALE * budget
+        * (h.employed ? precautionEmp : precautionJobless);
 
       const qFood = h.consumeFood * foodMult;
       const qGro = h.consumeGroceries * groMult;
@@ -281,6 +305,36 @@ export class ShadowPop {
         dueAt[i] = clock + RENT_PERIOD;
       }
 
+      // ---- the household balance sheet (consumer credit / Minsky) ----------
+      // Banks lend to the EMPLOYED short on cash (each draw creates deposits),
+      // up to a debt-service cap tied to wage income. Comfortable households
+      // deleverage (destroying money). The broke-and-jobless DEFAULT: the bank
+      // eats the balance (capital ↓ → system-wide credit rations) and the
+      // household is locked out of credit for a spell.
+      if (credit) {
+        const loan = h.loan ?? 0;
+        const lockUntil = h.lockUntil ?? 0;
+        if (h.employed && h.money < CC_TRIGGER && clock >= lockUntil) {
+          const cap = h.wage * 168 * CC_LIMIT_WEEKS;
+          if (loan < cap) {
+            const lent = credit.borrow(h.id, Math.min(CC_CHUNK, cap - loan));
+            h.money += lent;
+            h.loan = loan + lent;
+          }
+        } else if (loan > 0 && h.money > CC_COMFORT) {
+          const want = Math.min(loan, (h.money - CC_COMFORT) * Math.min(1, CC_REPAY_K * dt));
+          const paid = credit.repay(h.id, want);
+          h.money -= paid;
+          h.loan = loan - paid;
+        } else if (loan > 40 && !h.employed && h.money < CC_DEFAULT_MONEY) {
+          credit.writeOff(h.id);
+          h.loan = 0;
+          h.lockUntil = clock + CC_LOCK_HOURS;
+          this.defaultsCum++;
+          this.lastDefaults++;
+        }
+      }
+
       // keep money within sane bounds (debt bottoms out at the hard floor).
       if (h.money < MONEY_FLOOR) h.money = MONEY_FLOOR;
     }
@@ -309,10 +363,61 @@ export class ShadowPop {
         tierA: false,
         employer: h.employer,
         seeking: !h.employed,          // unemployed households are looking
+        wage: h.wage,
+        homeless: h.homeless,
       };
     }
     return out;
   }
+
+  /** debit `amt` from a household (loan interest); pays down to the hard floor.
+   *  Returns what was actually collected. */
+  debitCash(id: AgentId, amt: Money): Money {
+    const h = this.byId(id);
+    if (!h || amt <= 0) return 0;
+    const paid = Math.min(amt, Math.max(0, h.money - MONEY_FLOOR));
+    h.money -= paid;
+    return paid;
+  }
+
+  /** credit `amt` to a household (dividends, deposit interest). */
+  addMoney(id: AgentId, amt: Money): void {
+    const h = this.byId(id);
+    if (h && amt > 0) h.money += amt;
+  }
+
+  /** Σ positive balances (the deposit base banks pay interest on). */
+  positiveMoneySum(): Money {
+    let s = 0;
+    for (let i = 0; i < this.hh.length; i++) { const m = this.hh[i].money; if (m > 0) s += m; }
+    return s;
+  }
+
+  /** distribute deposit interest pro-rata over positive balances: every saver's
+   *  money grows by `factor` (= totalInterest / depositBase). */
+  scaleSavings(factor: number): void {
+    if (factor <= 0) return;
+    for (let i = 0; i < this.hh.length; i++) { const h = this.hh[i]; if (h.money > 0) h.money += h.money * factor; }
+  }
+
+  /** the richest credit-worthy household (an entrepreneur candidate) — or null. */
+  richest(minWealth: Money, exclude: ReadonlySet<AgentId>): ShadowHousehold | null {
+    let best: ShadowHousehold | null = null;
+    for (let i = 0; i < this.hh.length; i++) {
+      const h = this.hh[i];
+      if (h.money < minWealth || exclude.has(h.id) || h.homeless) continue;
+      if (!best || h.money > best.money) best = h;
+    }
+    return best;
+  }
+
+  /** append every household's wealth into `out` (for the combined A+C gini). */
+  wealthInto(out: number[]): void {
+    for (let i = 0; i < this.hh.length; i++) out.push(this.hh[i].money);
+  }
+
+  get defaults(): number { return this.defaultsCum; }
+  get defaultsThisTick(): number { return this.lastDefaults; }
 
   /** the labour market hired this household — attach the employer + wage. */
   applyHire(id: AgentId, businessId: BusinessId, wage: Money): void {
@@ -352,13 +457,14 @@ export class ShadowPop {
   /** compact readout with emergent inequality (gini) + aggregate demand. */
   view(): ShadowPopView {
     const n = this.hh.length;
-    let employed = 0, homeless = 0, sum = 0;
+    let employed = 0, homeless = 0, sum = 0, debt = 0;
     const monies = new Array<number>(n);
     for (let i = 0; i < n; i++) {
       const h = this.hh[i];
       if (h.employed) employed++;
       if (h.homeless) homeless++;
       sum += h.money;
+      debt += h.loan ?? 0;
       monies[i] = h.money;
     }
     monies.sort((a, b) => a - b);
@@ -379,6 +485,8 @@ export class ShadowPop {
       medianMoney,
       gini: this.giniOf(monies),
       aggregateDemand: this._aggDemand,
+      consumerDebt: debt,
+      defaults: this.defaultsCum,
     };
   }
 
@@ -387,7 +495,7 @@ export class ShadowPop {
   // ---------------------------------------------------------------------------
   toJSON(): unknown {
     return {
-      v: 1,
+      v: 2,
       seed: this.seed,
       rng: this.rng.save ? this.rng.save() : this.seed,
       hh: this.hh,
@@ -395,17 +503,23 @@ export class ShadowPop {
       chronic: this.chronic,
       demand: this._demand,
       agg: this._aggDemand,
+      defaults: this.defaultsCum,
     };
   }
 
   loadJSON(j: unknown): void {
     const o = j as {
       seed?: number; rng?: number; hh?: ShadowHousehold[]; rentDueAt?: number[];
-      chronic?: boolean[]; demand?: SectorMap; agg?: number;
+      chronic?: boolean[]; demand?: SectorMap; agg?: number; defaults?: number;
     } | null;
     if (!o) return;
     if (typeof o.seed === 'number') this.seed = o.seed >>> 0;
-    if (Array.isArray(o.hh)) this.hh = o.hh;
+    if (Array.isArray(o.hh)) {
+      this.hh = o.hh;
+      // v1 saves predate the balance-sheet fields — normalize them in.
+      for (const h of this.hh) { h.loan = h.loan ?? 0; h.lockUntil = h.lockUntil ?? 0; }
+    }
+    if (typeof o.defaults === 'number') this.defaultsCum = o.defaults;
     if (Array.isArray(o.rentDueAt)) this.rentDueAt = o.rentDueAt;
     if (Array.isArray(o.chronic)) this.chronic = o.chronic;
     else if (Array.isArray(o.hh)) this.chronic = new Array(o.hh.length).fill(false);

@@ -12,6 +12,7 @@ import type {
   AgentId, BusinessId, Money, BuildKind, BuildLot, Building, ConstructionView,
   Sector, SectorMap, MacroAggregates,
 } from './types';
+import { HURDLE_HOUSING, HURDLE_COMMERCIAL } from './config';
 import { clamp, type RNG } from '../../util/num';
 
 /** the credit interface a firm uses to finance projects — satisfied by the causal
@@ -91,10 +92,20 @@ export class Construction {
     const lot = this.freeLot();
     if (!lot) return;
 
+    // THE HURDLE RATE: a project is debt-financed, so when the bank's lending
+    // rate is above the hurdle the expected yield can't cover the interest and
+    // the firm sits on its hands — monetary tightening now stalls real
+    // investment (and easing revives it). This is the Fed's main lever into
+    // the physical town.
+    const rate = this.bank.loanRate(this.id);
+
     const wantHousing = ctx.housingVacancy < HOUSING_VACANCY_TRIGGER;
     let kind: BuildKind = 'housing';
     let sector: Sector | undefined;
-    if (!wantHousing) {
+    if (wantHousing) {
+      if (rate > HURDLE_HOUSING) return;
+    } else {
+      if (rate > HURDLE_COMMERCIAL) return;
       // only a bounded number of commercial blocks ever (keeps goods supply sane)
       const nComm = this.builds.reduce((n, b) => n + (b.kind === 'commercial' ? 1 : 0), 0);
       if (nComm >= MAX_COMMERCIAL) return;

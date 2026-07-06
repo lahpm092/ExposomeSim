@@ -45,7 +45,10 @@ export class GoodsMarket {
    */
   clear(demandUnits: number, supplyUnits: number): { price: Money; sold: number; shortage: number } {
     const excess = (demandUnits - supplyUnits) / (demandUnits + supplyUnits + 1e-6);
-    this._price = clamp(this._price + PRICE_ADJ * this._price * excess, 0.2 * this._base, 8 * this._base);
+    // ceiling 5× base: with firm exit possible, a briefly supplier-less sector
+    // pins at the ceiling until an entrant arrives — 5× reads as a crisis price
+    // without torching the CPI series the way 8× did.
+    this._price = clamp(this._price + PRICE_ADJ * this._price * excess, 0.2 * this._base, 5 * this._base);
     this._demand = demandUnits;
     this._supply = supplyUnits;
     this._sold = Math.min(demandUnits, supplyUnits);

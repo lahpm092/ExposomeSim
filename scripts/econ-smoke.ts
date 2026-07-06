@@ -6,7 +6,7 @@ import { getEmbedder, cosine } from '../src/llm/embed';
 const town = new Town({ llm: null, seed: 7, startHour: 7, speed: 0.05 });
 const DT_SIM = 0.05;
 const dtReal = DT_SIM / town.speed;
-const DAYS = 40;
+const DAYS = 70;    // long enough for the demography loop (entry → competition → exit)
 const STEPS = Math.round((DAYS * 24) / DT_SIM);
 
 const seenKinds = new Set<string>();
@@ -17,6 +17,8 @@ const startHead: Record<string, number> = {};
 let sampled = false;
 // monetary tracking
 let maxCredit = 0, maxConsErr = 0, minRate = 1, maxRate = 0, banksSolvent = true;
+// phase 4 tracking (emergence expansions)
+let maxConsumerDebt = 0, maxDepInt = 0, maxInventory = 0;
 
 for (let i = 0; i < STEPS; i++) {
   town.update(dtReal);
@@ -34,8 +36,10 @@ for (let i = 0; i < STEPS; i++) {
     maxRevenue = Math.max(maxRevenue, b.revenue);
     if (b.bankrupt) anyBankrupt = true;
     if (startHead[b.id] !== undefined && b.headcount !== startHead[b.id]) headcountChanged = true;
+    maxInventory = Math.max(maxInventory, b.inventory);
   }
   for (const ev of e.labor.recentEvents) seenKinds.add(ev.kind);
+  maxConsumerDebt = Math.max(maxConsumerDebt, e.shadow.consumerDebt);
   const mon = e.monetary;
   if (mon) {
     maxCredit = Math.max(maxCredit, mon.banks.reduce((s, b) => s + b.loans, 0));
@@ -43,6 +47,7 @@ for (let i = 0; i < STEPS; i++) {
     minRate = Math.min(minRate, mon.fed.policyRate);
     maxRate = Math.max(maxRate, mon.fed.policyRate);
     if (mon.banks.some((b) => !b.solvent)) banksSolvent = false;
+    maxDepInt = Math.max(maxDepInt, mon.depositInterest);
   }
 }
 
@@ -105,7 +110,7 @@ pass = ok('construction completed a building', (c?.completedBuildings ?? 0) > 0)
 const mon = e.monetary;
 console.log(`  (monetary: Fed ${(mon!.fed.policyRate * 100).toFixed(2)}% · base $${mon!.fed.baseMoney.toFixed(0)} · broad $${mon!.broadMoney.toFixed(0)}` +
   ` · loanRate ${(mon!.avgLendingRate * 100).toFixed(2)}% · consErr $${maxConsErr.toFixed(4)})`);
-pass = ok('Fed sets a positive policy rate', (mon?.fed.policyRate ?? 0) > 0) && pass;
+pass = ok('policy rate hit a positive level (ZLB allowed later)', maxRate > 0) && pass;
 pass = ok('base money + broad money exist', (mon?.baseMoney ?? 0) > 0 && (mon?.broadMoney ?? 0) > 0) && pass;
 pass = ok('banks created credit (loans)', maxCredit > 0) && pass;
 pass = ok('money conserved (double-entry ~0)', maxConsErr < (mon?.broadMoney ?? 1) * 1e-3) && pass;
@@ -114,5 +119,29 @@ pass = ok('banks stayed solvent', banksSolvent) && pass;
 pass = ok('supermarket served shopping trips', (sm?.trips ?? 0) > 0) && pass;
 pass = ok('supermarket inventory depleted + restocked', (sm?.totalSold ?? 0) > 0 && (sm?.fillLevel ?? 0) > 0.2) && pass;
 pass = ok('housing stock grew (a block completed)', e.housing.units > 320) && pass;
+
+// --- phase 4: emergence expansions (see ECONOMY_EMERGENCE.md) ---
+console.log(`  (demography: ${e.macro.firmsAlive} alive · ${e.macro.firmBirths} born · ${e.macro.firmDeaths} died` +
+  ` | credit: consumer max $${maxConsumerDebt.toFixed(0)} · defaults ${e.shadow.defaults} · writeOffs $${mon!.writeOffs.toFixed(0)}` +
+  ` | depInt max $${maxDepInt.toFixed(2)}/tick | inv max ${maxInventory.toFixed(1)})`);
+pass = ok('a firm was FOUNDED (entrepreneurial entry)', e.macro.firmBirths >= 1) && pass;
+pass = ok('credit risk is real (an exit or a write-off happened)', e.macro.firmDeaths >= 1 || mon!.writeOffs > 0) && pass;
+pass = ok('households used consumer credit', maxConsumerDebt > 0) && pass;
+pass = ok('deposit interest was paid to savers', maxDepInt > 0) && pass;
+pass = ok('a worker QUIT for a better wage (job ladder)', seenKinds.has('quit')) && pass;
+pass = ok('firms carried inventory (Metzler)', maxInventory > 0) && pass;
+pass = ok('gini spans the whole population', e.macro.gini > 0 && e.macro.gini < 1) && pass;
+
+// --- the Observatory's history (t0 → now, bounded, monotonic) ---
+const h = e.history!;
+const t = h.data[h.fields.indexOf('t')];
+let monotonic = true;
+for (let i = 1; i < h.n; i++) if (t[i] <= t[i - 1]) { monotonic = false; break; }
+console.log(`  (history: ${h.n} samples · stride ${h.stride}h · span ${t[0]?.toFixed(0)}→${t[h.n - 1]?.toFixed(0)}h · ${h.events.length} events · v${h.version})`);
+pass = ok('history recorded from t0 to now', h.n > 100 && t[0] < 48 && t[h.n - 1] > DAYS * 24 * 0.9) && pass;
+pass = ok('history time axis monotonic', monotonic) && pass;
+pass = ok('history stayed within its memory cap', h.n <= 1441 && h.fields.length === h.data.length) && pass;
+pass = ok('notable events were logged', h.events.length > 0) && pass;
+
 console.log(`\n${pass ? 'ALL PASS' : 'SOME FAILED'}`);
 process.exit(pass ? 0 : 1);

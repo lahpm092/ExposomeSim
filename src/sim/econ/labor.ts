@@ -18,6 +18,7 @@
 import type {
   FirmDemand, LaborCandidate, LaborEvent, LaborMarketView, LaborPlan, Money,
 } from './types';
+import { POACH_MARGIN, OTJ_SEARCH_P, HOMELESS_PENALTY } from './config';
 import { clamp, type RNG } from '../../util/num';
 
 // ---- tunables --------------------------------------------------------------
@@ -32,6 +33,10 @@ const SEEK_BONUS = 0.15;
  *  the borderline hire/fire from flip-flopping every tick. Kept well under 1 so
  *  skill still dominates the ordering. */
 const CHURN = 0.08;
+
+/** Inertia discount on employed searchers: switching jobs has a cost, so the
+ *  employed rank a notch below equally-skilled unemployed seekers. */
+const OTJ_INERTIA = 0.1;
 
 // ---- the market ------------------------------------------------------------
 
@@ -81,15 +86,29 @@ export class LaborMarket {
       }
     }
 
-    // ---- HIRES: match the unemployed pool into open vacancies ---------------
-    // Score each free candidate once: skill dominates, active seekers get a nudge,
-    // rng breaks ties. Sorting the pool once gives a stable global preference
-    // order; firms then take the best untaken candidate that clears their bar.
-    const pool = (candidates ?? [])
-      .filter((c) => c && c.employer === null)
-      .map((c) => ({ c, score: c.skill + (c.seeking ? SEEK_BONUS : 0) + rng() * CHURN }))
-      .sort((a, b) => b.score - a.score);
+    // ---- HIRES: match seekers into open vacancies ---------------------------
+    // The pool has two kinds of candidate:
+    //  • the UNEMPLOYED (employer === null) — score: skill + seek bonus + rng,
+    //    minus a penalty while homeless (job-finding hysteresis);
+    //  • the EMPLOYED-BUT-UNDERPAID (on-the-job search, the JOB LADDER): with
+    //    probability OTJ_SEARCH_P they look this tick, rank below equal-skill
+    //    unemployed (inertia), and only accept an offer ≥ POACH_MARGIN × their
+    //    current wage — a hire from this group is a QUIT at the old firm, which
+    //    creates replacement demand next tick (vacancy chains).
+    const pool: { c: LaborCandidate; score: number }[] = [];
+    for (const c of candidates ?? []) {
+      if (!c) continue;
+      if (c.employer === null) {
+        const score = c.skill + (c.seeking ? SEEK_BONUS : 0)
+          - (c.homeless ? HOMELESS_PENALTY : 0) + rng() * CHURN;
+        pool.push({ c, score });
+      } else if (rng() < OTJ_SEARCH_P) {
+        pool.push({ c, score: c.skill - OTJ_INERTIA + rng() * CHURN });
+      }
+    }
+    pool.sort((a, b) => b.score - a.score);
     const taken = new Set<string>();
+    const firedNow = new Set(fires.map((f) => f.agentId));
 
     let unfilled = 0;
     for (const f of firms ?? []) {
@@ -98,10 +117,21 @@ export class LaborMarket {
       let slots = f.desired - f.headcount;
       for (const p of pool) {
         if (slots <= 0) break;
-        if (taken.has(p.c.id) || p.c.skill < f.minSkill) continue;
-        taken.add(p.c.id);
-        hires.push({ agentId: p.c.id, businessId: f.id, wage: f.wage });
-        events.push({ t: clock, kind: 'hire', agentId: p.c.id, agentName: p.c.name, businessId: f.id, businessName: f.name, detail: `hired at ${f.name} · $${f.wage.toFixed(0)}/h` });
+        const c = p.c;
+        if (taken.has(c.id) || c.skill < f.minSkill) continue;
+        if (c.employer !== null) {
+          // poach conditions: not our own worker, not already being let go, and
+          // the offered wage clears the raise bar over their current wage.
+          if (c.employer === f.id || firedNow.has(c.id)) continue;
+          if (f.wage < (c.wage ?? 0) * POACH_MARGIN) continue;
+          taken.add(c.id);
+          hires.push({ agentId: c.id, businessId: f.id, wage: f.wage, prevEmployer: c.employer });
+          events.push({ t: clock, kind: 'quit', agentId: c.id, agentName: c.name, businessId: f.id, businessName: f.name, detail: `quit for ${f.name} · $${f.wage.toFixed(0)}/h` });
+        } else {
+          taken.add(c.id);
+          hires.push({ agentId: c.id, businessId: f.id, wage: f.wage });
+          events.push({ t: clock, kind: 'hire', agentId: c.id, agentName: c.name, businessId: f.id, businessName: f.name, detail: `hired at ${f.name} · $${f.wage.toFixed(0)}/h` });
+        }
         slots--;
       }
       if (slots > 0) unfilled += slots; // a vacancy no qualifying seeker could fill

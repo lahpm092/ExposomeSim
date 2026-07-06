@@ -9,10 +9,15 @@
 // =============================================================================
 
 import type { AgentId, CommercialBankView, Money } from './types';
+import { clamp } from '../../util/num';
 
 const CET1_MIN = 0.07;       // 4.5% minimum + 2.5% conservation buffer
 const CET1_TARGET = 0.12;    // banks lend freely down to here, then ration toward the floor
-const LOSS_RATE_ANNUAL = 0.008; // benign charge-off rate on the loan book
+// Residual charge-off noise only: REAL credit losses now arrive as writeOff()
+// calls when a borrower actually defaults (the financial accelerator), so the
+// blanket rate no longer double-counts them.
+const LOSS_RATE_ANNUAL = 0.002;
+const RISK_SPREAD_MAX = 0.06; // extra loan spread a capital-thin bank charges
 
 export interface LoanRec { balance: Money; rate: number }
 
@@ -81,13 +86,32 @@ export class CommercialBank {
   get openLoans(): number { return this.book.size; }
   loanRateFor(borrowerId: AgentId): number { return this.book.get(borrowerId)?.rate ?? this.lendingRate; }
 
+  /** borrower default: the loan asset dies against bank EQUITY; the deposits it
+   *  once created stay in circulation (money is not destroyed by a default).
+   *  Lower capital ⇒ smaller lendingCapacity ⇒ credit rationing — the
+   *  financial accelerator. Returns the balance written off. */
+  writeOff(borrowerId: AgentId): Money {
+    const rec = this.book.get(borrowerId);
+    if (!rec || rec.balance <= 0) return 0;
+    const loss = rec.balance;
+    this.book.delete(borrowerId);
+    this.loans = Math.max(0, this.loans - loss);
+    this.capital -= loss;
+    return loss;
+  }
+
   // ---- pricing -------------------------------------------------------------
-  /** set the loan/deposit rates off the Fed's prime + IORB (deposit beta < 1). */
+  /** set the loan/deposit rates off the Fed's prime + IORB (deposit beta < 1).
+   *  A capital-thin bank charges a RISK SPREAD: as CET1 slides from target to
+   *  the floor, new credit gets dearer — stress prices itself. */
   setRates(prime: number, iorb: number): void {
-    this.lendingRate = prime + 0.01;                // + a small default/term spread
+    const ratio = this.capitalRatio();
+    const thin = clamp((CET1_TARGET - ratio) / (CET1_TARGET - CET1_MIN), 0, 1);
+    this.lendingRate = prime + 0.01 + RISK_SPREAD_MAX * thin;
     this.depositRate = Math.max(0, iorb * 0.45);    // pass-through beta ~0.45
   }
   get offeredLoanRate(): number { return this.lendingRate; }
+  get offeredDepositRate(): number { return this.depositRate; }
 
   // ---- per-tick accounting (dt in sim-hours; rates annual) -----------------
   /** loan interest each borrower owes this tick (a TRANSFER borrower→bank equity).
@@ -100,14 +124,15 @@ export class CommercialBank {
   }
 
   /** close the tick's P&L into equity: + loan interest + IORB on reserves
-   *  − deposit interest − operating cost − loan losses. dK/dt = NII − opex − losses. */
-  settle(dtHours: number, loanInterest: Money, iorb: number): void {
+   *  − deposit interest (paid EXPLICITLY to households via the monetary layer,
+   *  passed in here so the P&L stays honest) − operating cost − residual losses.
+   *  Real credit losses land separately through writeOff(). */
+  settle(dtHours: number, loanInterest: Money, iorb: number, depositInterestPaid: Money = 0): void {
     const yr = dtHours / (24 * 365);
     const iorbIncome = this.reserves * iorb * yr;
-    const depositCost = this.deposits * this.depositRate * yr;
     const losses = this.loans * LOSS_RATE_ANNUAL * yr;
     const opex = this.deposits * 0.005 * yr;        // stylized operating cost
-    this.niiThisTick = loanInterest + iorbIncome - depositCost - losses - opex;
+    this.niiThisTick = loanInterest + iorbIncome - depositInterestPaid - losses - opex;
     this.capital += this.niiThisTick;
     // charge-offs also shrink the loan book (the losses are real asset write-downs).
     this.loans = Math.max(0, this.loans - losses);

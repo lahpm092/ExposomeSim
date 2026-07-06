@@ -88,6 +88,14 @@ export interface BusinessConfig {
   commercialRent: Money;      // rent charged per RENT_PERIOD
   founderIds: AgentId[];      // Tier-A ids that anchor this firm (e.g. Mara's counter)
   maxHeadcount: number;       // ceiling on workforce
+  /** anchor firms are load-bearing town infrastructure (Mara's counter, the
+   *  office, water & power): they can go bankrupt but are never REMOVED. */
+  anchor?: boolean;
+  /** the shadow household that founded this firm (entrants only) — receives
+   *  dividends when the firm is flush, so capital income is a real flow. */
+  ownerId?: AgentId;
+  /** demand-expectation learning rate per sim-hour (heterogeneous across firms). */
+  adaptRate?: number;
 }
 
 export interface BusinessState {
@@ -129,6 +137,12 @@ export interface BusinessView {
   health: number;
   bankrupt: boolean;
   hiring: boolean;            // desiredHeadcount > headcount and solvent
+  // phase 4 — expectations + inventories (Metzler) and demography
+  inventory: number;          // finished goods on hand (storable sectors)
+  expDemand: number;          // adaptive demand expectation (units/sim-hour)
+  produced: number;           // units produced last tick (COGS paid on these)
+  ownerId?: AgentId;          // entrant firms: the founding shadow household
+  foundedAt: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +220,8 @@ export interface LaborCandidate {
   tierA: boolean;            // full-res Character (vs shadow household)
   employer: BusinessId | null;
   seeking: boolean;          // actively looking (unemployed, or underpaid+restless)
+  wage?: Money;              // current wage (poaching compares offers against it)
+  homeless?: boolean;        // job-finding penalty (hysteresis / the poverty trap)
 }
 
 /** a firm's hiring posture handed to the labour market each tick. */
@@ -224,7 +240,8 @@ export interface FirmDemand {
 
 /** the labour market's decision, applied by the EconomySim (money-mover). */
 export interface LaborPlan {
-  hires: { agentId: AgentId; businessId: BusinessId; wage: Money }[];
+  /** prevEmployer set = a poach: the worker QUITS prevEmployer for businessId. */
+  hires: { agentId: AgentId; businessId: BusinessId; wage: Money; prevEmployer?: BusinessId }[];
   fires: { agentId: AgentId; businessId: BusinessId }[];
   events: LaborEvent[];
 }
@@ -245,6 +262,17 @@ export interface ShadowHousehold {
   consumeGroceries: number;
   propensityToConsume: number;// 0..1 fraction of income spent vs saved
   missedRent: number;
+  // phase 4 — the household balance sheet (Minsky channel)
+  loan?: Money;               // consumer-credit balance at the household's bank
+  lockUntil?: number;         // credit lockout after a default (abs sim-hours)
+}
+
+/** the consumer-credit primitives the shadow sweep uses (bound to the
+ *  MonetarySystem by the orchestrator so money stays causal + conserved). */
+export interface ConsumerCredit {
+  borrow(id: AgentId, amt: Money): Money;   // returns amount actually lent (rationed)
+  repay(id: AgentId, amt: Money): Money;    // returns amount actually repaid
+  writeOff(id: AgentId): Money;             // default: bank eats the balance
 }
 
 export interface ShadowPopView {
@@ -256,6 +284,8 @@ export interface ShadowPopView {
   medianMoney: Money;
   gini: number;               // 0..1 wealth inequality (emergent)
   aggregateDemand: number;    // total consumption units this tick
+  consumerDebt: Money;        // Σ household loan balances
+  defaults: number;           // cumulative consumer-credit defaults
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +302,10 @@ export interface MacroAggregates {
   bankruptcies: number;       // cumulative
   gini: number;               // wealth inequality across A + C
   boom: number;               // -1..1 business-cycle indicator (smoothed output gap)
+  // phase 4 — firm demography (Schumpeter)
+  firmsAlive: number;
+  firmBirths: number;         // cumulative entries
+  firmDeaths: number;         // cumulative true exits (removed, loans written off)
 }
 
 // ---------------------------------------------------------------------------
@@ -418,6 +452,34 @@ export interface MonetaryView {
   creditCreated: Money;      // new loans this tick (money created)
   creditRepaid: Money;       // repayments this tick (money destroyed)
   conservationError: Money;  // Σ assets − Σ liabilities across all sheets; ~0 if sound
+  // phase 4 — credit risk + the deposit channel
+  writeOffs: Money;          // cumulative loan balances written off against bank capital
+  writeOffsTick: Money;      // written off last tick
+  depositInterest: Money;    // deposit interest paid to households last tick (creates deposits)
+}
+
+// ---------------------------------------------------------------------------
+// 8f. HISTORY — the whole run, t0 → now, one sample per econ tick, decimated.
+//   The Economy Observatory reads this. `data` rows parallel `fields`; the
+//   arrays are LIVE references (never mutate); redraw when `version` changes.
+// ---------------------------------------------------------------------------
+export type EconEventKind =
+  | 'found' | 'bankrupt' | 'default' | 'policy' | 'evict' | 'boom' | 'bust';
+
+export interface EconEvent {
+  t: number;                  // abs sim-hours
+  kind: EconEventKind;
+  label: string;              // short human line for the event lane
+  mag?: number;               // optional magnitude (e.g. Δrate, $ written off)
+}
+
+export interface EconHistoryView {
+  version: number;            // bump = new sample or decimation; gate redraws on it
+  n: number;                  // samples currently held
+  stride: number;             // sim-hours per sample AFTER decimation (grows 1→2→4…)
+  fields: readonly string[];  // row names, index-aligned with `data`
+  data: readonly number[][];  // data[fieldIdx][sampleIdx]; live reference, read-only
+  events: readonly EconEvent[]; // notable events, oldest-first, bounded
 }
 
 // ---------------------------------------------------------------------------
@@ -435,6 +497,7 @@ export interface EconSnapshot {
   construction?: ConstructionView;
   supermarket?: SupermarketView;
   monetary?: MonetaryView;
+  history?: EconHistoryView;  // the full-run time series for the Observatory
 }
 
 // ---------------------------------------------------------------------------

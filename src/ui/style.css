@@ -153,9 +153,13 @@ body::before {
 .soma-row.sel { background: var(--ink); color: var(--paper); }
 .soma-row.sel b { color: var(--paper); }
 
-/* ---- stage overlays: city minimap · memory graph · psyche signature ---- */
+/* ---- stage overlays: city minimap · memory graph · economy observatory · psyche ---- */
 .cityview { position: absolute; inset: 0; z-index: 5; display: none; }
 .memoryviz { position: absolute; inset: 0; z-index: 6; display: none; }
+/* the Observatory is a full-screen data mode: it layers ABOVE the corner
+   widgets (cam roster z-8, psyche z-7, skyclock z-7, speech bubble z-8) —
+   unlike the memory graph, its strips fill every corner with content. */
+.econviz { position: absolute; inset: 0; z-index: 9; display: none; }
 .psycheviz {
   position: absolute; right: calc(var(--u) * 2); bottom: calc(var(--u) * 2); z-index: 7;
   display: block;
