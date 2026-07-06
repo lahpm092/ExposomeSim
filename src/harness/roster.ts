@@ -102,6 +102,8 @@ const HAT = {
   // the eight new hires
   indigo: 0x4636a8, coral: 0xd06a4f, olive: 0x7c7a2c, rose: 0xc65a86,
   slate: 0x556070, amber: 0xd39a1e, jade: 0x2f8f5f, plum: 0x884a8a,
+  // the five construction workers
+  rust: 0xa8501f, sky: 0x3a86a8, lime: 0x6f9f2f, wine: 0x7a2f4a, sand: 0xb59a5c,
 } as const;
 
 // ---- the ten -----------------------------------------------------------------
@@ -353,6 +355,63 @@ export const ROSTER: RosterEntry[] = [
     }),
     role: 'office_worker', workplace: 'office', hatColor: HAT.plum,
     interests: ['films', 'music', 'photography'], homeIndex: 17, officeFloor: 3,
+  },
+  // ---- 18–22: Ironline Construction — the crew that BUILDS the city ----------
+  {
+    profile: author(1301, {
+      name: 'Tomek', age: 41, role: 'site foreman',
+      backstory: 'Tomek has poured foundations and raised frames for two decades. He reads a half-built floor plate like a page and keeps the crew safe and moving.',
+      goals: ['bring it in on schedule', 'nobody gets hurt', 'build something that lasts'],
+      bigFive: { O: 0.2, C: 1.1, E: 0.3, A: 0.4, N: -0.3 }, attachment: 'secure', ses: -0.3,
+      mems: ['A frame raised true outlasts the people who raised it.', 'You measure twice out of respect for the crew.'],
+    }),
+    role: 'construction_worker', workplace: 'construction', hatColor: HAT.rust,
+    interests: ['football', 'cooking', 'history'], homeIndex: 18,
+  },
+  {
+    profile: author(1302, {
+      name: 'Bianca', age: 34, role: 'crane operator',
+      backstory: 'Bianca runs the tower crane with a surgeon\'s calm, swinging steel over the skyline all day. Precise, unflappable, a little proud of the view she works from.',
+      goals: ['land every lift clean', 'trust the rigging', 'own my corner of the sky'],
+      bigFive: { O: 0.6, C: 0.9, E: 0.4, A: 0.5, N: -0.2 }, attachment: 'secure', ses: -0.2,
+      mems: ['From up top the whole city is a model you can touch.', 'A steady hand is a kind of promise to the people below.'],
+    }),
+    role: 'construction_worker', workplace: 'construction', hatColor: HAT.sky,
+    interests: ['music', 'travel', 'astronomy'], homeIndex: 19,
+  },
+  {
+    profile: author(1303, {
+      name: 'Hassan', age: 28, role: 'steelworker',
+      backstory: 'Hassan walks the beams the rest of the crew won\'t. Young, strong, quietly ambitious — he\'s learning every trade on site so he can run his own crew one day.',
+      goals: ['learn every trade here', 'save toward my own crew', 'earn the foreman\'s nod'],
+      bigFive: { O: 0.5, C: 0.7, E: 0.6, A: 0.5, N: 0.1 }, attachment: 'anxious', ses: -0.5,
+      geno: { DRD4_7R: 2 },
+      mems: ['Every skill I pick up is a brick toward my own name on the sign.', 'The beam does not care that you are afraid; you go anyway.'],
+    }),
+    role: 'construction_worker', workplace: 'construction', hatColor: HAT.lime,
+    interests: ['football', 'cycling', 'video games'], homeIndex: 20,
+  },
+  {
+    profile: author(1304, {
+      name: 'Yuki', age: 37, role: 'concrete finisher',
+      backstory: 'Yuki finishes the slabs — the last hands on every floor. Meticulous and calm, she takes a private pride in surfaces no one will ever look at twice.',
+      goals: ['leave a surface true and smooth', 'no callbacks', 'a quiet, well-made day'],
+      bigFive: { O: 0.4, C: 1.2, E: -0.2, A: 0.6, N: 0.0 }, attachment: 'secure', ses: -0.3,
+      mems: ['The floor no one notices is the one I finished right.', 'Patience sets harder than the concrete does.'],
+    }),
+    role: 'construction_worker', workplace: 'construction', hatColor: HAT.wine,
+    interests: ['gardening', 'cooking', 'painting'], homeIndex: 21,
+  },
+  {
+    profile: author(1305, {
+      name: 'Omar', age: 45, role: 'site electrician',
+      backstory: 'Omar threads the nervous system through every new building — conduit, panels, the first lights to come on. Dry-humored, dependable, the one who stays late to make it safe.',
+      goals: ['make it safe before it\'s pretty', 'first lights on by handover', 'teach the young ones the code'],
+      bigFive: { O: 0.5, C: 1.0, E: 0.2, A: 0.5, N: -0.1 }, attachment: 'secure', ses: -0.2,
+      mems: ['The building comes alive the day its first light turns on.', 'Do the safe thing when no inspector is watching.'],
+    }),
+    role: 'construction_worker', workplace: 'construction', hatColor: HAT.sand,
+    interests: ['history', 'coffee', 'books'], homeIndex: 22,
   },
 ];
 

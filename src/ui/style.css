@@ -186,6 +186,9 @@ body::before {
   position: absolute; left: calc(var(--u) * 2); top: calc(var(--u) * 2); z-index: 8;
   display: flex; flex-direction: column; gap: 2px;
   padding: 7px 8px; min-width: 118px;
+  /* never overrun into the other stage overlays on a short window — a long
+     agent roster scrolls inside its own box instead of overflowing downward. */
+  max-height: calc(100% - var(--u) * 4); overflow-y: auto;
   background: rgba(233, 222, 196, 0.86); border: 1px solid var(--line); border-radius: 3px;
   box-shadow: 0 1px 0 rgba(120, 95, 55, 0.2);
 }

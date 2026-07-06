@@ -29,7 +29,7 @@ export const APT_SCALE = 1;
 // ---- building parameters (parametric: bump N_FLOORS / PER_SIDE for more) ----
 export const STOREY = 3.0;
 const HALF = STOREY / 2;
-export const N_FLOORS = 5;      // residential floors above the ground lobby (5×4 = 20 flats ≥ 18 agents)
+export const N_FLOORS = 6;      // residential floors above the ground lobby (6×4 = 24 flats ≥ 23 agents)
 const PER_SIDE = 2;             // apartments per side of the hallway, per floor
 const COLS = [-2.6, 2.6];       // apartment column centres (x)  (PER_SIDE = COLS.length)
 const APT_HALF_DEPTH = 2.8;     // apartment unit ZF (front) offset from its origin

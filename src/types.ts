@@ -13,6 +13,11 @@
 //    NOTE: candidate-gene effect sizes are small & partly contested; these are
 //    *interpretable parameter priors*, not claims of genomic determinism.
 // ---------------------------------------------------------------------------
+// The economy subsystem keeps its own self-contained contract (sim/econ/types.ts);
+// the Town surfaces a snapshot of it on TownSnapshot for the HUD.
+import type { EconSnapshot } from './sim/econ/types';
+export type { EconSnapshot };
+
 export type Allele2 = 0 | 1 | 2;
 
 export interface Genotype {
@@ -474,6 +479,7 @@ export interface TownSnapshot extends WorldSnapshot {
   focus?: number;          // which agent the inspector panels (brain/psyche/memory) track
   feed?: FeedView;         // the public social network (posts / comments / threads)
   company?: CompanySnapshot; // the office's emergent goal, teams and internal net
+  economy?: EconSnapshot;  // the market economy: wallets, firms, prices, labour, macro
 }
 
 /** A second full-resolution protagonist, projected for the renderer + dashboard. */
@@ -499,9 +505,10 @@ export type RoleKind =
   | 'food_boss'      // the fast-food venue's boss/manager
   | 'cleaner'        // the fast-food venue's cleaner (standing-fatigue ODE)
   | 'office_worker'  // one of six low-level office employees
-  | 'office_boss';   // the office boss (the larger office)
+  | 'office_boss'    // the office boss (the larger office)
+  | 'construction_worker'; // builds the city's new low-poly buildings
 
-export type Workplace = 'foodcourt' | 'office';
+export type Workplace = 'foodcourt' | 'office' | 'construction';
 
 /** where an agent's BODY is, for the renderer (macro placement). */
 export type AgentPlace = 'home' | 'foodcourt' | 'office' | 'commuting';

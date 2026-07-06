@@ -41,6 +41,7 @@ import { createPhoneState, stepPhone, rolloverPhone, type PhoneCtx } from '../ha
 import { sleepPropensity, sleepDriveOf, melatoninGate, type SleepCtx } from '../harness/sleep';
 import { PublicFeed, type FeedMember } from './feed';
 import { Company, type CompanyMemberView } from './company';
+import type { AgentEconInput } from './econ/types';
 import { fallbackResponse } from '../llm/prompt';
 import { clamp, type RNG } from '../util/num';
 
@@ -136,6 +137,24 @@ export class Society {
 
   /** the Characters, for the Town to expose / inspect. Index 0 is Mara. */
   get characters(): Character[] { return this.rts.map((r) => r.ch); }
+
+  /** per-agent economic inputs for the EconomySim: where each agent is (at work?)
+   *  and its felt need deficits (drive cost-of-living spend). Index 0 is Mara. */
+  econInputs(): AgentEconInput[] {
+    return this.rts.map((rt) => {
+      const atWork = rt.place === 'office' || rt.place === 'foodcourt';
+      return {
+        id: rt.entry.profile.id,
+        name: rt.entry.profile.name,
+        atWork,
+        workHours: atWork ? 1 : 0,
+        hunger: clamp(1 - rt.ch.phys.satiety, 0, 1),
+        thirst: clamp(1 - rt.ch.phys.hydration, 0, 1),
+        seekingWork: false,
+        conscientious: rt.entry.profile.bigFive.C,
+      };
+    });
+  }
 
   setMaraMacro(m: MaraMacro): void { this.mara = m; }
 
@@ -242,7 +261,9 @@ export class Society {
       this.leaveConvo(rt.idx);
     }
     const target: AgentPlace = rt.atWork
-      ? (rt.entry.workplace === 'foodcourt' ? 'foodcourt' : 'office')
+      ? (rt.entry.workplace === 'foodcourt' ? 'foodcourt'
+        : rt.entry.workplace === 'office' ? 'office'
+        : 'home')   // construction crew work off-site → they read as home
       : 'home';
     if (target !== 'home') rt.asleep = false;   // leaving for work wakes you
     rt.place = target;

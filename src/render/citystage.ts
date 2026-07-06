@@ -26,11 +26,23 @@ import { AgentBodies } from './agentbodies';
 import { StreetLife } from './streetlife';
 import { buildFoodBuilding, type FoodBuilding } from './foodcourt';
 import { buildOfficeBuilding, type OfficeBuilding } from './office';
+import { buildSupermarket } from './supermarket';
+import { buildFederalReserve, buildCommercialBank } from './civicbank';
+import { BankCrowd, type CrowdAnchor } from './bankcrowd';
+import { syncConstruction, type ConstructionRegistry } from './buildsite';
 import { ROSTER } from '../harness/roster';
 import { PLACES } from '../sim/places';
+import { BUILD_LOTS } from '../sim/econ/config';
 
 const V = THREE.Vector3;
 const PLACE_IDS: PlaceId[] = ['home', 'work', 'market', 'thirdplace', 'park'];
+// the buildable district: a large plane around the compact core where the
+// construction firm raises new low-poly buildings on empty lots.
+const DISTRICT_HALF = 132;
+const SUPERMARKET_POS = new V(0, 0, -78);
+// the financial district: the Federal Reserve + a commercial bank, north of core.
+const FED_POS = new V(0, 0, 112);
+const BANK_POS = new V(-50, 0, 110);
 const STREETS: [PlaceId, PlaceId][] = [
   ['home', 'work'], ['home', 'market'], ['work', 'market'],
   ['market', 'thirdplace'], ['work', 'thirdplace'], ['home', 'park'], ['market', 'park'],
@@ -61,6 +73,10 @@ export class CityStage {
 
   private readonly locales = new Map<PlaceId, Locale>();
   private readonly fillers: THREE.Object3D[] = [];
+  // registry of construction-firm buildings, reconciled from the economy snapshot.
+  private readonly constructionReg: ConstructionRegistry = { groups: new Map() };
+  // the financial-district crowd (only rendered when the camera is near the buildings).
+  private bankCrowd!: BankCrowd;
 
   private readonly mara: Humanoid;
   private readonly residentHumans: Humanoid[] = [];  // the 9 other agents
@@ -100,8 +116,8 @@ export class CityStage {
     this.canvas = canvas;
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
     this.renderer.setClearColor(PALETTE.paper, 1);
-    this.camera = new THREE.PerspectiveCamera(42, 1, 0.02, 300);
-    this.scene.fog = new THREE.Fog(PALETTE.paper, 46, 110);
+    this.camera = new THREE.PerspectiveCamera(42, 1, 0.02, 1100);
+    this.scene.fog = new THREE.Fog(PALETTE.paper, 100, 560);   // reaches across the expanded district
 
     this.mats = makeCityMats();
     this.buildGround();
@@ -145,6 +161,30 @@ export class CityStage {
     this.scene.add(officeGroup);
     officeGroup.updateMatrixWorld(true);
 
+    // the SUPERMARKET — the town's grocery hub — on open ground south of the core,
+    // its storefront facing the town centre.
+    const market = buildSupermarket(this.mats);
+    market.group.position.copy(SUPERMARKET_POS);
+    market.group.rotation.y = Math.atan2(-SUPERMARKET_POS.x, -SUPERMARKET_POS.z); // face centre
+    this.scene.add(market.group);
+    market.group.updateMatrixWorld(true);
+
+    // the FINANCIAL DISTRICT — the Federal Reserve + a commercial bank, facing the
+    // town centre. Their staff/customers only render when the camera is near (below).
+    const fed = buildFederalReserve(this.mats);
+    fed.group.position.copy(FED_POS);
+    fed.group.rotation.y = Math.atan2(-FED_POS.x, -FED_POS.z);
+    this.scene.add(fed.group); fed.group.updateMatrixWorld(true);
+    const bank = buildCommercialBank(this.mats);
+    bank.group.position.copy(BANK_POS);
+    bank.group.rotation.y = Math.atan2(-BANK_POS.x, -BANK_POS.z);
+    this.scene.add(bank.group); bank.group.updateMatrixWorld(true);
+    const anchors: CrowdAnchor[] = [
+      { pos: FED_POS.clone(), radius: 15, count: 9, door: FED_POS.clone().add(new V(0, 0, -8)) },
+      { pos: BANK_POS.clone(), radius: 11, count: 6, door: BANK_POS.clone().add(new V(0, 0, -6)) },
+    ];
+    this.bankCrowd = new BankCrowd(this.scene, anchors);
+
     // one sim-driven controller places all ten bodies across the three buildings.
     this.agentBodies = new AgentBodies({
       home: home.building!, homeGroup: home.building!.group,
@@ -186,7 +226,8 @@ export class CityStage {
 
   // ------------------------------------------------------------- build
   private buildGround(): void {
-    const half = CITY * 0.62, grid: number[] = [], step = 6;
+    // the buildable plane spans the whole expanded district (not just the core).
+    const half = DISTRICT_HALF, grid: number[] = [], step = 8;
     for (let x = -half; x <= half; x += step) grid.push(x, 0, -half, x, 0, half);
     for (let z = -half; z <= half; z += step) grid.push(-half, 0, z, half, 0, z);
     const g = new THREE.BufferGeometry();
@@ -232,19 +273,27 @@ export class CityStage {
   }
 
   private buildFiller(): void {
-    const half = CITY * 0.5;
+    // Fill the expanded district with low-poly massing (a Manhattan-ish skyline of
+    // hashed blocks) EXCEPT: the open core plaza, the authored locales, the empty
+    // construction lots (so the firm has visible room to build), and the supermarket.
+    const step = 15, n = Math.floor((DISTRICT_HALF - 8) / step);
     const placesW = PLACE_IDS.map((id) => mapToWorld(PLACES[id].pos2D));
-    for (let gx = -4; gx <= 4; gx++) {
-      for (let gz = -4; gz <= 4; gz++) {
-        const s = (gx + 8) * 131 + (gz + 8) * 17, h = hash01(s);
-        if (h < 0.42) continue;
-        const x = gx * (CITY / 9) + (hash01(s + 3) - 0.5) * 4;
-        const z = gz * (CITY / 9) + (hash01(s + 7) - 0.5) * 4;
-        if (Math.abs(x) > half || Math.abs(z) > half) continue;
-        const p = new V(x, 0, z);
-        if (placesW.some((pw) => pw.distanceTo(p) < 11)) continue;
-        const blk = fillerBlock(this.mats, 3 + hash01(s + 11) * 4, 3 + hash01(s + 17) * 9, 3 + hash01(s + 13) * 4, h > 0.6);
-        blk.position.set(x, 0, z);
+    // small grid-index seeds keep the sine-hash well-behaved (large seeds degrade it).
+    for (let gx = -n; gx <= n; gx++) {
+      for (let gz = -n; gz <= n; gz++) {
+        const s = (gx + 40) * 73 + (gz + 40) * 149, h = hash01(s);
+        if (h < 0.14) continue;                                   // gaps = streets/plots
+        const jx = gx * step + (hash01(s + 3) - 0.5) * 7, jz = gz * step + (hash01(s + 7) - 0.5) * 7;
+        const p = new V(jx, 0, jz);
+        if (Math.hypot(jx, jz) < 24) continue;                   // keep the core plaza open
+        if (placesW.some((pw) => pw.distanceTo(p) < 13)) continue;
+        if (BUILD_LOTS.some((l) => Math.hypot(l.x - jx, l.z - jz) < 18)) continue; // leave lots free
+        if (SUPERMARKET_POS.distanceTo(p) < 16) continue;
+        if (FED_POS.distanceTo(p) < 22 || BANK_POS.distanceTo(p) < 15) continue; // civic plaza
+        // a dense low-rise field with taller towers scattered through it (a skyline).
+        const tall = hash01(s + 23) > 0.78 ? 18 + hash01(s + 29) * 22 : 0;
+        const blk = fillerBlock(this.mats, 5 + hash01(s + 11) * 7, 5 + hash01(s + 17) * 10 + tall, 5 + hash01(s + 13) * 7, h > 0.5);
+        blk.position.set(jx, 0, jz);
         blk.rotation.y = Math.round(hash01(s + 19) * 4) * (Math.PI / 2);
         this.scene.add(blk);
         this.fillers.push(blk);
@@ -357,6 +406,12 @@ export class CityStage {
       }
       this.maraWorld.copy(this.mara.pos);
       this.syncFigures(snap);
+      // the construction firm's buildings — spawn on breaking ground, grow with
+      // progress, settle when complete (reconciled from the economy snapshot).
+      const cons = snap.economy?.construction;
+      if (cons) syncConstruction(this.scene, cons.buildings, this.constructionReg, this.mats);
+      // the bank/Fed crowd: cheap bodies, spawned only when the camera is near.
+      this.bankCrowd.update(this.camera.position, dt);
       this.streetLife.update(dt);   // ambient wandering extras (own their own tick)
       this.updateLOD(snap);
     } catch { /* never break the loop */ }
