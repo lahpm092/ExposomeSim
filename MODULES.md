@@ -68,6 +68,20 @@ core  ←  { llm, mind, econ }  ←  world  ←  persist
 - **May import from:** `core/`.
 - Knows nothing about minds or the town; the town drives it via `econsim.ts`.
 
+## src/causal/ — the causal radius + evolving surrogate
+
+- **Owns:** the resolution gate for the expanding world (see
+  `WORLD_EXPANSION.md` §3): `gate.ts` (radius + hysteresis around the main
+  characters), `stats.ts` (`VenueStats` — the EVOLVING probabilistic function:
+  hour-bucketed EMAs learned only from fully-simulated "hot" episodes, with
+  hierarchical venue↔archetype↔flat shrinkage), `flow.ts` (Poisson
+  discretization of the econ tick's exact aggregates for hot venues; silent
+  drift for cold ones — resolution changes, conservation never does),
+  `index.ts` (`CausalField` facade), `types.ts`.
+- **Entry points:** `CausalField` (`index.ts`), `causal/types.ts`.
+- **May import from:** `core/` only. Pure: no THREE, no DOM, no town imports.
+- Verified standalone by `scripts/causal-smoke.ts`.
+
 ## src/world/ — the town / society layer
 
 - **Owns:** the level-of-detail town that composes minds + economy into a
@@ -76,7 +90,7 @@ core  ←  { llm, mind, econ }  ←  world  ←  persist
   `arbiter.ts` (needs → action), `society.ts`, `events.ts`, `conversation.ts`,
   `relationship.ts`, `socialaffect.ts`, `interests.ts`, `feed.ts`, `company.ts`.
 - **Entry points:** `Town` (`town.ts`), `society.ts`, `places.ts`.
-- **May import from:** `core/`, `llm/`, `mind/`, `econ/`.
+- **May import from:** `core/`, `llm/`, `mind/`, `econ/`, `causal/`.
 
 ## src/persist/ — save / load / branching
 

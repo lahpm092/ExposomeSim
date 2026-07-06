@@ -55,6 +55,8 @@ a slow **allostatic-load** integrator that is the exposome's memory.
 | llm | `llm/client.ts` | swappable backend (Ollama now → remote API later) |
 | | `llm/prompt.ts` | interoception rendering, role-play contract, tolerant JSON parsing |
 | world | `world/town.ts`, `world/arbiter.ts`, `world/places.ts` | the level-of-detail town; needs-arbitrated agency |
+| econ | `econ/econsim.ts` + module | the emergent market economy: firms/supply chains/premises, banking + Fed, shadow population (`ECONOMY_EMERGENCE.md`, `WORLD_EXPANSION.md`) |
+| causal | `causal/index.ts` | the **causal radius**: full event-resolution near main characters; everywhere else drifts on a **learned average-causality surrogate** |
 | render | `render/citystage.ts` | three.js — the **orbit-camera 3D city** + LOD |
 | | `render/worldgeo.ts` · `render/humanoid.ts` | low-poly black-mesh buildings & **articulated humanoids** |
 | | `render/brain.ts` | MRI brain instrument with **live activation glow** |
