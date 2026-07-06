@@ -29,7 +29,7 @@ import { buildOfficeBuilding, type OfficeBuilding } from './office';
 import { buildSupermarket } from './supermarket';
 import { buildFederalReserve, buildCommercialBank } from './civicbank';
 import { BankCrowd, type CrowdAnchor } from './bankcrowd';
-import { syncConstruction, type ConstructionRegistry } from './buildsite';
+import { syncConstruction, makeConstructionRegistry, type WorldRenderCtx } from './buildsite';
 import { ROSTER } from '../mind/roster';
 import { PLACES } from '../world/places';
 import { BUILD_LOTS } from '../econ/config';
@@ -74,7 +74,13 @@ export class CityStage {
   private readonly locales = new Map<PlaceId, Locale>();
   private readonly fillers: THREE.Object3D[] = [];
   // registry of construction-firm buildings, reconciled from the economy snapshot.
-  private readonly constructionReg: ConstructionRegistry = { groups: new Map() };
+  private readonly constructionReg = makeConstructionRegistry();
+  // one persistent context object handed to the building reconciler each frame
+  // (fields mutated in place — no per-frame allocation).
+  private readonly worldCtx: WorldRenderCtx = {
+    camPos: new THREE.Vector3(), hourOfDay: 12, dt: 0,
+    causal: undefined, businesses: undefined, builders: undefined, forceHot: false,
+  };
   // the financial-district crowd (only rendered when the camera is near the buildings).
   private bankCrowd!: BankCrowd;
 
@@ -387,6 +393,11 @@ export class CityStage {
   /** debug: per-body routing state (region / transiting / scale / pose). */
   agentDebug(): unknown { return this.agentBodies.debug(); }
 
+  /** dev-only: force every archetype venue HOT for the building reconciler, so
+   *  headless captures can photograph a mounted interior without steering an
+   *  agent into the causal radius. Render-side only — the sim is untouched. */
+  debugHotVenues(on: boolean): void { this.worldCtx.forceHot = on; }
+
   update(snap: TownSnapshot, dtReal: number): void {
     const dt = Number.isFinite(dtReal) ? clampNum(dtReal, 0, 0.1) : 0;
     this.clock += dt;
@@ -406,10 +417,21 @@ export class CityStage {
       }
       this.maraWorld.copy(this.mara.pos);
       this.syncFigures(snap);
-      // the construction firm's buildings — spawn on breaking ground, grow with
-      // progress, settle when complete (reconciled from the economy snapshot).
+      // the construction firms' buildings — spawn on breaking ground, grow with
+      // progress, settle when complete, and fit their tenant's archetype on
+      // lease (reconciled from the merged economy snapshot). The world context
+      // gates near-only interiors + the learned cold-venue ambience.
       const cons = snap.economy?.construction;
-      if (cons) syncConstruction(this.scene, cons.buildings, this.constructionReg, this.mats);
+      if (cons) {
+        const w = this.worldCtx;
+        w.camPos.copy(this.camera.position);
+        w.hourOfDay = ((Math.floor(snap.time) % 24) + 24) % 24;
+        w.dt = dt;
+        w.causal = snap.causal;
+        w.businesses = snap.economy?.businesses;
+        w.builders = snap.economy?.builders;
+        syncConstruction(this.scene, cons.buildings, this.constructionReg, this.mats, w);
+      }
       // the bank/Fed crowd: cheap bodies, spawned only when the camera is near.
       this.bankCrowd.update(this.camera.position, dt);
       this.streetLife.update(dt);   // ambient wandering extras (own their own tick)
