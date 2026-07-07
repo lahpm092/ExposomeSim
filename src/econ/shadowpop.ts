@@ -24,6 +24,7 @@ import type {
   AgentId, BusinessId, ConsumerCredit, LaborCandidate, MacroAggregates,
   Money, SectorMap, ShadowHousehold, ShadowPopView,
 } from './types';
+import { SECTORS } from './types';
 import {
   BASE_WAGE, DEMAND_ELASTICITY, EVICT_MISSED_PERIODS, FOOD_UNIT_PRICE,
   GROCERY_UNIT_PRICE, MEALS_PER_DAY, MIN_WAGE, RENT_PERIOD, RUIN_MONEY,
@@ -31,6 +32,8 @@ import {
   CC_TRIGGER, CC_CHUNK, CC_COMFORT, CC_REPAY_K, CC_LIMIT_WEEKS,
   CC_DEFAULT_MONEY, CC_LOCK_HOURS, FEAR_U0, FEAR_K, FEAR_CUT,
   FURN_PERIOD_H, APPAREL_PERIOD_H, DURABLE_COMFORT,
+  VEHICLE_BASE, CAR_PRICE_MULT, BIKE_PRICE_MULT, VEH_PERIOD_H, VEH_COMFORT,
+  COMMUTE_RIDES_DAY, OWN_CAR_RIDE_MULT, OWN_BIKE_RIDE_MULT, RELIEF_LINE,
 } from './config';
 import { clamp, mulberry32, type RNG } from '../core/util/num';
 
@@ -63,6 +66,8 @@ const REF: SectorMap = {
   retail: RETAIL_REF,
   homegoods: 6.0,
   apparel: 7.0,
+  transit: 3.2,           // the base fare (elasticity anchor for ride demand)
+  vehicles: VEHICLE_BASE, // durable: demand is wear-driven; ref kept for totality
 };
 
 /** clamp the elastic multiplier so a near-zero price can't blow demand up nor a
@@ -114,6 +119,13 @@ function elast(price: number, ref: number): number {
   return clamp(Math.pow(ref / p, DEMAND_ELASTICITY), ELAST_MIN, ELAST_MAX);
 }
 
+/** a fresh all-zero demand map (SECTORS-driven — literals went stale before). */
+function zeroDemand(): SectorMap {
+  const m = {} as SectorMap;
+  for (const s of SECTORS) m[s] = 0;
+  return m;
+}
+
 // =============================================================================
 // ShadowPop
 // =============================================================================
@@ -133,8 +145,16 @@ export class ShadowPop {
   private lastDefaults = 0;
 
   /** demand accumulator, reused across steps (zeroed in place — no allocation). */
-  private _demand: SectorMap = { food: 0, groceries: 0, software: 0, utilities: 0, retail: 0, homegoods: 0, apparel: 0 };
+  private _demand: SectorMap = zeroDemand();
   private _aggDemand = 0;
+  // phase 6 — mobility + levies (last-tick aggregates → TransportField/CivicView)
+  private _fareSpend = 0;         // fares debited last tick
+  private _commuteDemand = 0;     // fare-demand units last tick
+  private _carOwners = 0;
+  private _bikeOwners = 0;
+  /** levies collected this sweep, drained by the orchestrator (collectTaxes). */
+  private _taxPendP = 0;
+  private _taxPendS = 0;
 
   /**
    * Seed `n` households with a lognormal-ish spread of cash and skill. ~50% start
@@ -193,6 +213,13 @@ export class ShadowPop {
         apparelWear: r(),
         furnRate: (1 / FURN_PERIOD_H) * (0.6 + 0.8 * r()),
         apparelRate: (1 / APPAREL_PERIOD_H) * (0.6 + 0.8 * r()),
+        // phase 6 — nobody owns a vehicle at t0: the modal split must EMERGE
+        // from wealth crossing the purchase gates, not from seeding.
+        ownsCar: false,
+        ownsBike: false,
+        vehWear: r(),
+        vehRate: (1 / VEH_PERIOD_H) * (0.6 + 0.8 * r()),
+        commuteNeed: COMMUTE_RIDES_DAY * (0.6 + 0.8 * r()),
       };
 
       // stagger the weekly rent charge across the period via a cheap id hash so
@@ -211,12 +238,15 @@ export class ShadowPop {
     prices: SectorMap,
     rent: Money,
     credit: ConsumerCredit | null = null,
+    levies: { payroll: number; sales: number } | null = null,
   ): void {
     const dt = ctx.dtHours;
     const dtDay = dt / 24;                 // per-day baselines → this tick
     const clock = ctx.clock;
     const rng = this.rng;                  // internal, serialized stream (see header)
     this.lastDefaults = 0;
+    const levyP = levies?.payroll ?? 0;
+    const levyS = levies?.sales ?? 0;
 
     // Booms loosen wallets, busts tighten them — confidence rides the cycle and
     // only touches discretionary (retail) spend.
@@ -240,13 +270,19 @@ export class ShadowPop {
     const groMult = elast(prices.groceries, REF.groceries) * dtDay;
     const utilMult = elast(prices.utilities, REF.utilities) * dtDay;
     const retMult = elast(prices.retail, REF.retail) * dtDay * confidence;
+    const fareMult = elast(prices.transit, REF.transit) * dtDay;   // cheap fares → riders
 
     // zero the demand accumulator in place (households never buy software).
     const D = this._demand;
-    D.food = 0; D.groceries = 0; D.software = 0; D.utilities = 0; D.retail = 0;
-    D.homegoods = 0; D.apparel = 0;
+    for (const s of SECTORS) D[s] = 0;
     const pFurn = prices.homegoods;
     const pApp = prices.apparel;
+    // the per-kind vehicle stickers ride the sector price (anchor ratios).
+    const pFare = prices.transit;
+    const pCar = prices.vehicles * CAR_PRICE_MULT;
+    const pBike = prices.vehicles * BIKE_PRICE_MULT;
+    this._fareSpend = 0; this._commuteDemand = 0;
+    this._carOwners = 0; this._bikeOwners = 0;
 
     const hh = this.hh;
     const dueAt = this.rentDueAt;
@@ -258,6 +294,11 @@ export class ShadowPop {
       // ---- income / human capital -----------------------------------------
       if (h.employed) {
         h.money += h.wage * dt;                                  // wages accrue on the clock
+        if (levyP > 0) {                                         // payroll levy → treasury
+          const tax = levyP * h.wage * dt;
+          h.money -= tax;
+          this._taxPendP += tax;
+        }
         h.skill = clamp(h.skill + SKILL_GROWTH * dtDay * 0.5, 0, 1); // learn-by-doing (slow)
       } else {
         // no income (savings erode through consumption below); reskill a touch
@@ -297,8 +338,22 @@ export class ShadowPop {
       D.food += qFood; D.groceries += qGro; D.utilities += qUtil; D.retail += qRet;
 
       // debit the basket at current market prices.
-      h.money -= qFood * prices.food + qGro * prices.groceries
+      let spent = qFood * prices.food + qGro * prices.groceries
         + qUtil * prices.utilities + qRet * prices.retail;
+
+      // ---- commuting (phase 6): the EMPLOYED demand rides — keyed off
+      // h.employed (most shadow jobs are wider-economy, employer === null).
+      // Ownership substitutes the paid mode away: the modal split emerges
+      // from who could afford a vehicle, not from a scripted share.
+      if (h.employed) {
+        const ownMult = h.ownsCar ? OWN_CAR_RIDE_MULT : h.ownsBike ? OWN_BIKE_RIDE_MULT : 1;
+        const qFare = (h.commuteNeed ?? COMMUTE_RIDES_DAY) * ownMult * fareMult * budget;
+        D.transit += qFare;
+        spent += qFare * pFare;
+        this._commuteDemand += qFare;
+        this._fareSpend += qFare * pFare;
+      }
+      h.money -= spent;
 
       // ---- durables wear (phase 5): wear grows with time; crossing 1 with
       // money above a comfort floor ⇒ ONE discrete purchase (a demand unit) at
@@ -323,6 +378,36 @@ export class ShadowPop {
           h.apparelWear = 0.1 * rng();
         } else h.apparelWear = 1;
       } else h.apparelWear = aw;
+
+      // ---- vehicles (phase 6): the SAME durable-wear mechanism, with a
+      // two-rung wealth gate — a household in the market buys the best vehicle
+      // its cash clears (car ≫ bike), sets the ownership flag that gates its
+      // commute mode above, and defers saturated when it can afford neither.
+      const vw = (h.vehWear ?? 0) + (h.vehRate ?? 1 / VEH_PERIOD_H) * dt;
+      if (vw >= 1) {
+        if (h.money > VEH_COMFORT + 2 * pCar) {
+          D.vehicles += 1;
+          h.money -= pCar;
+          h.ownsCar = true;
+          h.vehWear = 0.1 * rng();
+        } else if (h.money > VEH_COMFORT + 2 * pBike) {
+          D.vehicles += 1;
+          h.money -= pBike;
+          h.ownsBike = true;
+          h.vehWear = 0.1 * rng();
+        } else h.vehWear = 1;
+      } else h.vehWear = vw;
+      if (h.ownsCar) this._carOwners++;
+      else if (h.ownsBike) this._bikeOwners++;
+
+      // ---- sales levy → treasury (on the consumption basket + fares;
+      // durables exempt — taxing a car purchase at the same rate would just
+      // shift the wealth gate, not add signal).
+      if (levyS > 0 && spent > 0) {
+        const tax = levyS * spent;
+        h.money -= tax;
+        this._taxPendS += tax;
+      }
 
       // ---- rent / eviction -------------------------------------------------
       if (!h.homeless) {
@@ -377,7 +462,8 @@ export class ShadowPop {
       if (h.money < MONEY_FLOOR) h.money = MONEY_FLOOR;
     }
 
-    this._aggDemand = D.food + D.groceries + D.utilities + D.retail + D.homegoods + D.apparel;
+    this._aggDemand = 0;
+    for (const s of SECTORS) this._aggDemand += D[s];   // (software stays 0 — B2B)
   }
 
   // ---------------------------------------------------------------------------
@@ -386,11 +472,63 @@ export class ShadowPop {
 
   /** aggregate consumption UNITS per sector from the last step() (fresh copy). */
   demand(): SectorMap {
-    const d = this._demand;
+    const out = zeroDemand();
+    for (const s of SECTORS) out[s] = this._demand[s];
+    return out;
+  }
+
+  /** drain the levies collected by the last sweep (the orchestrator credits the
+   *  treasury with exactly these — the per-payer debits already happened). */
+  collectTaxes(): { payroll: Money; sales: Money } {
+    const out = { payroll: this._taxPendP, sales: this._taxPendS };
+    this._taxPendP = 0;
+    this._taxPendS = 0;
+    return out;
+  }
+
+  /** RELIEF: distribute `amount` evenly across the households below the relief
+   *  line (all of them if none qualify). Returns exactly what was credited. */
+  relief(amount: Money): Money {
+    if (amount <= 0 || this.hh.length === 0) return 0;
+    let needy = 0;
+    for (let i = 0; i < this.hh.length; i++) if (this.hh[i].money < RELIEF_LINE) needy++;
+    const n = needy > 0 ? needy : this.hh.length;
+    const share = amount / n;
+    for (let i = 0; i < this.hh.length; i++) {
+      const h = this.hh[i];
+      if (needy === 0 || h.money < RELIEF_LINE) h.money += share;
+    }
+    return amount;
+  }
+
+  /** FARE COLLECTION: debit `amount` across the employed non-car-owning
+   *  households (the riders), evenly, respecting the debt floor. Returns what
+   *  was actually collected — the orchestrator credits the operator with it. */
+  debitFares(amount: Money): Money {
+    if (amount <= 0) return 0;
+    let riders = 0;
+    for (let i = 0; i < this.hh.length; i++) {
+      const h = this.hh[i];
+      if (h.employed && !h.ownsCar) riders++;
+    }
+    if (riders === 0) return 0;
+    const share = amount / riders;
+    let collected = 0;
+    for (let i = 0; i < this.hh.length; i++) {
+      const h = this.hh[i];
+      if (!h.employed || h.ownsCar) continue;
+      const paid = Math.min(share, Math.max(0, h.money - MONEY_FLOOR));
+      h.money -= paid;
+      collected += paid;
+    }
+    return collected;
+  }
+
+  /** the aggregates TransportField.tick consumes (ownership, demand, fares). */
+  transportAggregates(): { carOwners: number; bikeOwners: number; commuteDemand: number; fareSpend: Money } {
     return {
-      food: d.food, groceries: d.groceries, software: d.software,
-      utilities: d.utilities, retail: d.retail,
-      homegoods: d.homegoods, apparel: d.apparel,
+      carOwners: this._carOwners, bikeOwners: this._bikeOwners,
+      commuteDemand: this._commuteDemand, fareSpend: this._fareSpend,
     };
   }
 
@@ -529,6 +667,10 @@ export class ShadowPop {
       aggregateDemand: this._aggDemand,
       consumerDebt: debt,
       defaults: this.defaultsCum,
+      carOwners: this._carOwners,
+      bikeOwners: this._bikeOwners,
+      commuteDemand: this._commuteDemand,
+      fareSpend: this._fareSpend,
     };
   }
 
@@ -537,7 +679,7 @@ export class ShadowPop {
   // ---------------------------------------------------------------------------
   toJSON(): unknown {
     return {
-      v: 2,
+      v: 3,
       seed: this.seed,
       rng: this.rng.save ? this.rng.save() : this.seed,
       hh: this.hh,
@@ -546,6 +688,11 @@ export class ShadowPop {
       demand: this._demand,
       agg: this._aggDemand,
       defaults: this.defaultsCum,
+      // phase 6 — last-tick transport aggregates (byte-stable round trip)
+      fareSpend: this._fareSpend,
+      commuteDemand: this._commuteDemand,
+      carOwners: this._carOwners,
+      bikeOwners: this._bikeOwners,
     };
   }
 
@@ -553,6 +700,7 @@ export class ShadowPop {
     const o = j as {
       seed?: number; rng?: number; hh?: ShadowHousehold[]; rentDueAt?: number[];
       chronic?: boolean[]; demand?: SectorMap; agg?: number; defaults?: number;
+      fareSpend?: number; commuteDemand?: number; carOwners?: number; bikeOwners?: number;
     } | null;
     if (!o) return;
     if (typeof o.seed === 'number') this.seed = o.seed >>> 0;
@@ -573,6 +721,18 @@ export class ShadowPop {
           h.furnRate = (1 / FURN_PERIOD_H) * (0.6 + 0.8 * f2);
           h.apparelRate = (1 / APPAREL_PERIOD_H) * (0.6 + 0.8 * f1);
         }
+        // pre-phase-6 saves lack the vehicle/commute fields: absent means
+        // NOT BORN — nobody owned a vehicle before dealerships existed. Same
+        // deterministic index-hash backfill (byte-stable, no rng spend).
+        if (typeof h.vehWear !== 'number') {
+          const f3 = ((Math.imul(i + 13, 2246822519) >>> 0) % 1000) / 1000;
+          const f4 = ((Math.imul(i + 29, 3266489917) >>> 0) % 1000) / 1000;
+          h.ownsCar = false;
+          h.ownsBike = false;
+          h.vehWear = f3;
+          h.vehRate = (1 / VEH_PERIOD_H) * (0.6 + 0.8 * f4);
+          h.commuteNeed = COMMUTE_RIDES_DAY * (0.6 + 0.8 * f3);
+        }
       }
     }
     if (typeof o.defaults === 'number') this.defaultsCum = o.defaults;
@@ -581,13 +741,14 @@ export class ShadowPop {
     else if (Array.isArray(o.hh)) this.chronic = new Array(o.hh.length).fill(false);
     if (o.demand) {
       const d = o.demand;
-      this._demand = {
-        food: d.food ?? 0, groceries: d.groceries ?? 0, software: d.software ?? 0,
-        utilities: d.utilities ?? 0, retail: d.retail ?? 0,
-        homegoods: d.homegoods ?? 0, apparel: d.apparel ?? 0,
-      };
+      this._demand = zeroDemand();
+      for (const s of SECTORS) this._demand[s] = d[s] ?? 0;
     }
     if (typeof o.agg === 'number') this._aggDemand = o.agg;
+    this._fareSpend = o.fareSpend ?? 0;
+    this._commuteDemand = o.commuteDemand ?? 0;
+    this._carOwners = o.carOwners ?? 0;
+    this._bikeOwners = o.bikeOwners ?? 0;
     if (this.rng.load && typeof o.rng === 'number') this.rng.load(o.rng);
   }
 

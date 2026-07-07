@@ -203,14 +203,25 @@ export function openNow(p: Place, clock: number): boolean {
 }
 
 /**
- * Telescoped travel time in sim-hours between two places, derived from the
- * euclidean distance of their town coordinates and compressed into ~[0.15,0.5]h
- * so a full day's movement stays cheap. Same place ⇒ 0.
+ * Travel cost in generalized sim-hours between two places. By default the old
+ * telescoped estimate (euclidean town-coord distance compressed into
+ * ~[0.15,0.5]h). Once the Town installs its transport hook, this returns the
+ * street network's generalized cost (best-mode time + fare as time-equivalent)
+ * — so the arbiter's K_TRAVEL term and the actual journey price agree, while
+ * the arbiter itself stays a pure function.
  */
 export function travelTime(a: PlaceId, b: PlaceId): number {
   if (a === b) return 0;
+  if (travelCostHook) return travelCostHook(a, b);
   const pa = PLACES[a].pos2D;
   const pb = PLACES[b].pos2D;
   const dist = Math.hypot(pa.x - pb.x, pa.y - pb.y); // [0, ~1.41]
   return clamp(0.1 + dist * 0.55, 0.15, 0.5);
+}
+
+// the town-installed transport seam (kept here so arbiter/places stay pure and
+// signature-stable; the live Town overwrites it on construction/restart).
+let travelCostHook: ((a: PlaceId, b: PlaceId) => number) | null = null;
+export function installTravelCost(fn: ((a: PlaceId, b: PlaceId) => number) | null): void {
+  travelCostHook = fn;
 }

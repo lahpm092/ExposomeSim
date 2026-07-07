@@ -18,7 +18,7 @@ import type {
   AgentId, BusinessId, Money, BuildKind, BuildLot, Building, ConstructionView,
   MacroAggregates,
 } from './types';
-import { HURDLE_HOUSING, HURDLE_COMMERCIAL, HURDLE_PRELET, SHOPFRONT_COST, WORKSHOP_COST, COMMERCIAL_VACANT_MIN } from './config';
+import { HURDLE_HOUSING, HURDLE_COMMERCIAL, HURDLE_PRELET, SHOPFRONT_COST, WORKSHOP_COST, COMMERCIAL_VACANT_MIN, CIVIC_COST } from './config';
 import { clamp, type RNG } from '../core/util/num';
 
 /** the credit interface a firm uses to finance projects — satisfied by the causal
@@ -29,8 +29,6 @@ export interface Financier {
   loanBalance(id: AgentId): Money;
   loanRate(id: AgentId): number;
 }
-
-let _bSeq = 0;
 
 /** the shared buildable-land ledger: BOTH construction firms draw from it, and a
  *  lot is claimed ATOMICALLY the instant a project starts (or a seed building is
@@ -89,6 +87,13 @@ export class Construction {
   private readonly builds: Building[] = [];
   private readonly bank: Financier;
   private lastStartAt = -1e9;   // clock of the last groundbreaking (build cooldown)
+  /** PER-INSTANCE building counter, ids namespaced by firm — a module-global
+   *  seq leaked across EconomySim instances and broke same-seed byte-identity.
+   *  (Legacy 'bld<n>' ids from old saves coexist fine — ids are data.) */
+  private bSeq = 0;
+  private nextBldId(): string {
+    return 'bld-' + this.id.slice(4, 7) + (this.bSeq++).toString(36);
+  }
 
   constructor(id: BusinessId, name: string, pool: LotPool, bank: Financier, opts: { seedCash?: Money; wage?: Money } = {}) {
     this.id = id;
@@ -122,6 +127,28 @@ export class Construction {
   seedBuilding(b: Building): void {
     this.pool.mark(b.lotId);
     this.builds.push(b);
+  }
+
+  /** a PUBLIC commission (a 'civic-build' spend order): the client pays the
+   *  whole budget up front (moved by the orchestrator: treasury → this cash);
+   *  the build cost comes out of it (materials leak like every build) and the
+   *  spread is the contractor's margin. No hurdle rate — a signed contract is
+   *  its own financing. Returns the started building, or null if no lot. */
+  commission(kind: BuildKind, budget: Money, clock: number, rng: RNG): Building | null {
+    const lot = this.pool.claim();
+    if (!lot) return null;
+    this.cash += budget;
+    const cost = CIVIC_COST;
+    if (this.cash < cost) this.cash += this.bank.borrow(this.id, cost - this.cash);
+    this.cash -= cost;
+    const b: Building = {
+      id: this.nextBldId(), kind, lotId: lot.id,
+      x: lot.x, z: lot.z, w: lot.w, d: lot.d, floors: 2 + Math.floor(rng() * 2),
+      progress: 0, complete: false, cost,
+      dwellings: 0, capacity: 0, cumIncome: 0, startedAt: clock,
+    };
+    this.builds.push(b);
+    return b;
   }
 
   buildingById(id: string): Building | undefined { return this.builds.find((b) => b.id === id); }
@@ -176,7 +203,7 @@ export class Construction {
 
     const floors = kind === 'housing' ? 4 + Math.floor(ctx.rng() * 5) : kind === 'shopfront' ? 1 + Math.floor(ctx.rng() * 2) : 1;
     this.builds.push({
-      id: 'bld' + (_bSeq++).toString(36), kind, lotId: lot.id,
+      id: this.nextBldId(), kind, lotId: lot.id,
       x: lot.x, z: lot.z, w: lot.w, d: lot.d, floors,
       progress: 0, complete: false, cost,
       dwellings: kind === 'housing' ? HOUSING_DWELLINGS : 0,
@@ -256,7 +283,7 @@ export class Construction {
   }
 
   toJSON(): unknown {
-    return { cash: this.cash, wage: this.wageRate, workers: this.workers, builds: this.builds, seq: _bSeq, lastStartAt: this.lastStartAt };
+    return { cash: this.cash, wage: this.wageRate, workers: this.workers, builds: this.builds, seq: this.bSeq, lastStartAt: this.lastStartAt };
   }
   loadJSON(j: unknown): void {
     const o = j as { cash?: number; wage?: number; workers?: AgentId[]; builds?: Building[]; seq?: number; lastStartAt?: number } | null;
@@ -269,7 +296,8 @@ export class Construction {
       this.builds.push(...o.builds);
       for (const b of this.builds) this.pool.mark(b.lotId);   // re-claim our lots
     }
-    if (typeof o.seq === 'number') _bSeq = Math.max(_bSeq, o.seq);
+    // legacy saves stored the old process-global counter — max keeps new ids clear.
+    if (typeof o.seq === 'number') this.bSeq = Math.max(this.bSeq, o.seq);
     if (typeof o.lastStartAt === 'number') this.lastStartAt = o.lastStartAt;
   }
 }

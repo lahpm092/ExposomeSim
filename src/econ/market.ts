@@ -37,6 +37,11 @@ export class GoodsMarket {
   get sector(): Sector { return this._sector; }
   get price(): Money { return this._price; }
 
+  /** ADMINISTERED pricing (a publicly-chartered operator): the treasury fixes
+   *  the price outside tâtonnement — pair with clear(…, discover=false) so the
+   *  quantities still record while price discovery stays off. */
+  administer(p: Money): void { if (p > 0) this._price = p; }
+
   /**
    * Walrasian tâtonnement: nudge the price along the sign of excess demand,
    * scaled by how lopsided the market is. `+1e-6` keeps a dead (0/0) market

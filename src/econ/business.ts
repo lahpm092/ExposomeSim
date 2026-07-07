@@ -38,7 +38,7 @@ const WAGE_CEIL_MULT = 3;       // wages may drift up to this × the firm's base
  *  utilities sit in between. Emergent selectivity, not scripted staffing. */
 const SKILL_BAR: Record<Sector, number> = {
   food: 0, retail: 0, groceries: 0.05, utilities: 0.18, software: 0.35,
-  homegoods: 0.05, apparel: 0.05,
+  homegoods: 0.05, apparel: 0.05, transit: 0.1, vehicles: 0.05,
 };
 
 /** a retail shelf slot: one good's stock, demand share, cap and the blended
@@ -62,6 +62,7 @@ export class Business {
   readonly kind: BusinessKind;         // 'service' (default) | 'maker' | 'retail'
   readonly good?: GoodId;              // makers: the good produced
   readonly archetype?: string;         // render-side building archetype (data only)
+  readonly administered: boolean;      // public operator: serves at the set fare
 
   // ---- immutable config (identity + economics; rebuilt by the ctor) ----------
   private readonly _seedCash: Money;
@@ -127,6 +128,7 @@ export class Business {
     this.kind = cfg.kind ?? 'service';
     this.good = cfg.good;
     this.archetype = cfg.archetype;
+    this.administered = cfg.administered ?? false;
     this._seedCash = cfg.seedCash;
     this._basePrice = cfg.basePrice;
     this._unitCost = cfg.unitCost;
@@ -230,9 +232,11 @@ export class Business {
     // orders) is price-INELASTIC and import-ceilinged, so the tâtonnement
     // equilibrium lands wherever this throttle says "enough" — 1.05× would pin
     // every maker just below average cost forever (a bleed-out, not a market).
+    // an ADMINISTERED operator (public charter) keeps serving below marginal
+    // cost — the fare is set by the treasury and subsidy covers the losses.
     const marginalCost = this._unitCost + (this._capacityPerWorker > 0 ? this._wage / this._capacityPerWorker : 0);
     const floorPrice = marginalCost * (this.kind === 'maker' ? MAKER_FLOOR_MARKUP : 1.05);
-    if (this._price < floorPrice && this._price > 0) {
+    if (!this.administered && this._price < floorPrice && this._price > 0) {
       planned *= clamp(Math.pow(this._price / floorPrice, 2), 0.15, 1);
     }
     const production = clamp(planned, 0, capT);
@@ -377,6 +381,14 @@ export class Business {
   /** grocery retail: count the shopping trips served (SupermarketView.trips). */
   recordTrips(n: number): void { this._tripsCum += n; }
   get trips(): number { return this._tripsCum; }
+
+  /** an operating grant (transit subsidy) — booked as revenue so decide() staffs
+   *  a funded operator up and lets a defunded one shed (POLIS insolvency chain). */
+  receiveSubsidy(amt: Money): void {
+    if (amt <= 0) return;
+    this._cash += amt;
+    this._revenueAcc += amt;
+  }
 
   /** Book a payroll disbursement this tick (the orchestrator pays the wallets). */
   bookPayroll(amount: Money): void {

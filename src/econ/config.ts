@@ -127,6 +127,33 @@ export const BUSINESSES: BusinessConfig[] = [
     baseWage: 11, commercialRent: 130, founderIds: [], maxHeadcount: 3,
     kind: 'maker', good: 'furniture', archetype: 'furniture',
   },
+  // ---- phase 6: mobility (TRANSPORT_DESIGN.md 'fleet + operators') ----------
+  // The dealership is a plain RETAIL firm: car + bike shelves restocked from
+  // wholesale markets whose import channel IS the out-of-town manufacture
+  // (GOOD_MAKER_CAP 0 — nobody builds cars here). basePrice = the share-blended
+  // vehicle sticker (see VEHICLE_BASE); buyers pay the per-kind anchor ratio.
+  // capacityPerWorker sits WELL above the integer purchase lumps (~0.3/h mean,
+  // spikes of 2-3): a dealer whose staff throughput reads a two-buyer hour as
+  // a shortage ratchets the sticker to the tâtonnement ceiling and never back.
+  {
+    id: 'biz-dealership', name: 'Axle & Rim Motors', sector: 'vehicles',
+    seedCash: 9000, basePrice: 157.5, unitCost: 87, capacityPerWorker: 4,
+    baseWage: 12, commercialRent: 240, founderIds: [], maxHeadcount: 2,
+    kind: 'retail', archetype: 'dealership',
+    shelf: [
+      { good: 'car', share: 0.3, cap: 10 },
+      { good: 'bike', share: 0.7, cap: 22 },
+    ],
+  },
+  // The taxi firm: a service Business selling rides into the transit sector.
+  // capacityPerWorker sized so ONE driver serves the town's t0 fare demand
+  // (~7 rides/h) at ~70% utilisation — under the hiring bar, so it doesn't
+  // hire-fire oscillate (the phase-4 balance lesson).
+  {
+    id: 'biz-taxi', name: 'Crossline Cabs', sector: 'transit',
+    seedCash: 3800, basePrice: 3.2, unitCost: 0.9, capacityPerWorker: 10,
+    baseWage: 13, commercialRent: 220, founderIds: [], maxHeadcount: 3,
+  },
 ];
 
 /** which sector supplies each subsistence need the town reports. */
@@ -179,7 +206,7 @@ export const INV_CORRECT = 0.35;      // per-tick correction toward target inven
 /** target inventory in HOURS of expected demand (0 = non-storable sector). */
 export const INV_TARGET_H: Record<Sector, number> = {
   food: 1.5, groceries: 0, software: 0, utilities: 0, retail: 3,
-  homegoods: 4, apparel: 4,
+  homegoods: 4, apparel: 4, transit: 0, vehicles: 4,
 };
 /** the inventory-gap correction is bounded to ±this × expected demand per tick,
  *  so a bare shelf can't demand 3× capacity (which would nullify every other
@@ -188,7 +215,7 @@ export const INV_CORRECT_CAP = 0.6;
 /** fraction of unsold stock that survives one sim-hour (0 = perishes instantly). */
 export const INV_KEEP_H: Record<Sector, number> = {
   food: 0.75, groceries: 0, software: 0, utilities: 0, retail: 0.995,
-  homegoods: 0.998, apparel: 0.998,
+  homegoods: 0.998, apparel: 0.998, transit: 0, vehicles: 0.999,
 };
 
 // ---- E3: household balance sheets (consumer credit / Minsky) -----------------
@@ -220,6 +247,10 @@ export const DIV_K = 0.05;            // per-hour dividend rate on excess owner-
 export const SECTOR_FIRM_CAP: Record<Sector, number> = {
   food: 3, groceries: 2, software: 2, utilities: 2, retail: 3,
   homegoods: 2, apparel: 2,
+  // transit cap 2 = the seeded taxi + ONE more operator: a rich household on a
+  // persistent transit shortage, or the publicly-chartered authority —
+  // whichever the race produces first (TRANSPORT_DESIGN.md). One dealership.
+  transit: 2, vehicles: 1,
 };
 /** entrant templates (draws jitter productivity/cost around these). For the
  *  RETAIL sectors, unitCost ≈ the (blended) wholesale anchor — the margin math
@@ -235,6 +266,11 @@ export const SECTOR_TEMPLATES: Record<Sector, {
   retail: { basePrice: 3.6, unitCost: 1.8, capacityPerWorker: 10, baseWage: 11, commercialRent: 220 },
   homegoods: { basePrice: 6.0, unitCost: 3.3, capacityPerWorker: 6, baseWage: 10, commercialRent: 170 },
   apparel: { basePrice: 7.0, unitCost: 3.85, capacityPerWorker: 6, baseWage: 10, commercialRent: 170 },
+  // transit unitCost ≈ vehicle wear + fuel per ride: margin at base fare is
+  // 2.13× — over the 1.5× shortage-entry floor, under the 2.5× fat-margin bar,
+  // so a private operator enters ONLY on a persistent unserved-ride shortage.
+  transit: { basePrice: 3.2, unitCost: 1.5, capacityPerWorker: 9, baseWage: 13, commercialRent: 200 },
+  vehicles: { basePrice: 157.5, unitCost: 87, capacityPerWorker: 4, baseWage: 12, commercialRent: 240 },
 };
 export const FIRM_NAMES: Record<Sector, string[]> = {
   food: ['Ash & Ember Diner', 'Marrow Kitchen', 'The Tin Spoon', 'Solstice Grill'],
@@ -244,6 +280,8 @@ export const FIRM_NAMES: Record<Sector, string[]> = {
   retail: ['Foxglove Goods', 'Paper Lantern', 'Harbor Sundries', 'Wren & Co'],
   homegoods: ['Gable & Grain Home', 'The Copper Kettle', 'Hearthside Goods'],
   apparel: ['Juniper Thread', 'Second Bloom Clothiers', 'Warp & Weft'],
+  transit: ['Beacon Rides', 'Northgate Coaches'],
+  vehicles: ['Harborview Motors'],
 };
 
 // ---- E4/E6: job ladder + labour frictions -------------------------------------
@@ -263,14 +301,14 @@ export const SOFT_EXTERNAL = 2.0;     // out-of-town client baseline (units/h)
 // ---- CPI basket (weighted; the durables join at small weights) ---------------
 export const CPI_WEIGHTS: Partial<Record<Sector, number>> = {
   food: 0.30, groceries: 0.27, utilities: 0.20, retail: 0.13,
-  homegoods: 0.05, apparel: 0.05,
+  homegoods: 0.05, apparel: 0.05, transit: 0.04, vehicles: 0.02,
 };
 
 // ---- goods price anchors ------------------------------------------------------
 /** per-good RETAIL anchor (what a unit stickers at in its sector). */
 export const GOOD_RETAIL_ANCHOR: Record<GoodId, number> = {
   produce: 2.0, dairy: 2.4, bakery: 2.4, meat: 3.2, grains: 1.6, drinks: 1.8,
-  furniture: 6.0, apparel: 7.0,
+  furniture: 6.0, apparel: 7.0, car: 420, bike: 45,
 };
 /** wholesale base ≈ 55% of the retail anchor (the maker's side of the margin). */
 export const WHOLESALE_FRAC = 0.55;
@@ -298,15 +336,20 @@ export const RETAIL_SHELF: Partial<Record<Sector, { good: GoodId; share: number;
   ],
   homegoods: [{ good: 'furniture', share: 1, cap: 260 }],
   apparel: [{ good: 'apparel', share: 1, cap: 240 }],
+  vehicles: [
+    { good: 'car', share: 0.3, cap: 10 },
+    { good: 'bike', share: 0.7, cap: 22 },
+  ],
 };
 /** HUD labels for the grocery categories (SupermarketView). */
 export const GOOD_LABELS: Record<GoodId, string> = {
   produce: 'Produce', dairy: 'Dairy', bakery: 'Bakery', meat: 'Meat & Fish',
   grains: 'Grains & Dry', drinks: 'Drinks', furniture: 'Furniture', apparel: 'Apparel',
+  car: 'Cars', bike: 'Bicycles',
 };
 /** target shelf depth in HOURS of expected sales (the bounded-correction target). */
 export const SHELF_TARGET_H: Partial<Record<Sector, number>> = {
-  groceries: 24, homegoods: 36, apparel: 36,
+  groceries: 24, homegoods: 36, apparel: 36, vehicles: 48,
 };
 
 // ---- maker templates (entrants; the two seeded makers live in BUSINESSES) -----
@@ -328,6 +371,10 @@ export const MAKER_TEMPLATES: Record<GoodId, {
   drinks: { rawCost: 0.35, capacityPerWorker: 22, baseWage: 10, maxHeadcount: 3, archetype: 'workshop' },
   furniture: { rawCost: 1.15, capacityPerWorker: 10, baseWage: 11, maxHeadcount: 3, archetype: 'furniture' },
   apparel: { rawCost: 1.35, capacityPerWorker: 8, baseWage: 11, maxHeadcount: 3, archetype: 'tailor' },
+  // vehicles are made OUT OF TOWN (GOOD_MAKER_CAP 0 — the import channel is
+  // the factory); rows exist for map totality only.
+  car: { rawCost: 150, capacityPerWorker: 0.06, baseWage: 16, maxHeadcount: 4, archetype: 'workshop' },
+  bike: { rawCost: 16, capacityPerWorker: 0.5, baseWage: 12, maxHeadcount: 3, archetype: 'workshop' },
 };
 export const MAKER_NAMES: Record<GoodId, string[]> = {
   produce: ['Rowan Row Produce', 'Green Furrow Farmshop'],
@@ -338,17 +385,19 @@ export const MAKER_NAMES: Record<GoodId, string[]> = {
   drinks: ['Coldspring Bottling'],
   furniture: ['Oxbow Joinery', 'Tenon & True'],
   apparel: ['Nightingale Tailoring', 'Selvedge House'],
+  car: ['Meridian Motorworks'],
+  bike: ['Spoke & Sprocket Works'],
 };
 /** maker finished-goods inventory: target hours of expected demand + hourly
  *  survival (perishables spoil; durables keep) — keyed by GOOD, since a maker's
  *  SECTOR tables describe its retail downstream, not its own warehouse. */
 export const MAKER_INV_TARGET_H: Record<GoodId, number> = {
   produce: 1, dairy: 1, bakery: 0.5, meat: 1, grains: 6, drinks: 6,
-  furniture: 6, apparel: 6,
+  furniture: 6, apparel: 6, car: 12, bike: 12,
 };
 export const MAKER_KEEP_H: Record<GoodId, number> = {
   produce: 0.9, dairy: 0.92, bakery: 0.9, meat: 0.9, grains: 0.999, drinks: 0.999,
-  furniture: 0.998, apparel: 0.998,
+  furniture: 0.998, apparel: 0.998, car: 0.999, bike: 0.999,
 };
 /** the maker supply floor sits at this × marginal cost (service firms use
  *  1.05×): wholesale orders are price-inelastic and import-ceilinged, so the
@@ -359,6 +408,7 @@ export const MAKER_FLOOR_MARKUP = 1.5;
 export const GOOD_MAKER_CAP: Record<GoodId, number> = {
   produce: 1, dairy: 1, bakery: 2, meat: 1, grains: 1, drinks: 1,
   furniture: 2, apparel: 2,
+  car: 0, bike: 0,   // no local manufacture — vehicles stay import-supplied
 };
 /** maker entry thresholds (margins over raw + labour marginal cost — thinner
  *  than retail's, wholesale trade runs tight; the import ceiling caps them). */
@@ -373,6 +423,7 @@ export const GOOD_SECTOR: Record<GoodId, Sector> = {
   produce: 'groceries', dairy: 'groceries', bakery: 'groceries',
   meat: 'groceries', grains: 'groceries', drinks: 'groceries',
   furniture: 'homegoods', apparel: 'apparel',
+  car: 'vehicles', bike: 'vehicles',
 };
 
 /** supply-chain entrants (makers + retailers) capitalize heavier than service
@@ -385,10 +436,12 @@ export const ENTRY_LOAN_MULT_CHAIN = 2.0;
 export const KIND_FOR_SECTOR: Record<Sector, 'service' | 'retail'> = {
   food: 'service', software: 'service', utilities: 'service', retail: 'service',
   groceries: 'retail', homegoods: 'retail', apparel: 'retail',
+  transit: 'service', vehicles: 'retail',
 };
 /** render archetype an entrant RETAILER carries (groceries → a rival market). */
 export const RETAIL_ARCHETYPE: Partial<Record<Sector, string>> = {
   groceries: 'market2', homegoods: 'workshop', apparel: 'workshop',
+  vehicles: 'dealership',
 };
 
 // ---- durables demand (shadow wear-and-tear accumulators) -----------------------
@@ -439,3 +492,59 @@ export const CONSTRUCTION_FIRMS: { id: string; name: string }[] = [
 ];
 /** the 5 Tier-A construction founders split 3/2 across the two firms. */
 export const CONSTRUCTION_CREW_SPLIT = 3;
+
+// =============================================================================
+// PHASE 6 — mobility + civic execution
+// (see TRANSPORT_DESIGN.md 'fleet + operators' and POLIS_DESIGN.md wiring)
+// =============================================================================
+
+// ---- vehicles: the car/bike durables ------------------------------------------
+/** the dealership's share-blended vehicle sticker (0.3·car + 0.7·bike anchors) —
+ *  the vehicles sector's t0 price; a buyer pays the per-kind anchor RATIO of
+ *  the live sector price, so tâtonnement moves both stickers together. */
+export const VEHICLE_BASE = 0.3 * GOOD_RETAIL_ANCHOR.car + 0.7 * GOOD_RETAIL_ANCHOR.bike;   // 157.5
+export const CAR_PRICE_MULT = GOOD_RETAIL_ANCHOR.car / VEHICLE_BASE;
+export const BIKE_PRICE_MULT = GOOD_RETAIL_ANCHOR.bike / VEHICLE_BASE;
+/** mean sim-hours between one household's vehicle-need events (wear crossing 1). */
+export const VEH_PERIOD_H = 700;
+/** comfort floor: replace/buy only when cash clears price×2 plus this buffer —
+ *  the wealth gate that makes the modal split EMERGE (few afford the car bar). */
+export const VEH_COMFORT = 60;
+
+// ---- commuting: fare demand for the transit sector ------------------------------
+/** fare-demand units/day an EMPLOYED household generates (jittered per household;
+ *  keys off h.employed — most shadow jobs are in the wider economy). */
+export const COMMUTE_RIDES_DAY = 0.8;
+/** ride-demand multipliers once a household owns a vehicle (mode substitution). */
+export const OWN_CAR_RIDE_MULT = 0.15;
+export const OWN_BIKE_RIDE_MULT = 0.4;
+/** Tier-A: employed agents ride a small fare trickle (units/h). */
+export const TIERA_FARE_TRICKLE = 0.03;
+
+// ---- civic execution (the econ side of POLIS_DESIGN's GovTickResult) ------------
+/** the treasury's account id at the banks (Financier: deficit = money creation)
+ *  and the public-employer id that joins firmDemands()/applyPlan dispatch. */
+export const GOV_TREASURY_ID = 'gov-treasury';
+export const GOV_EMPLOYER_ID = 'gov';
+/** levy rates are clamped here — no confiscatory decrees. */
+export const LEVY_MAX = 0.35;
+/** treasury cash above this repays bank debt; below zero it borrows. */
+export const GOV_CUSHION = 1500;
+/** insolvency line: below this (banks rationing) public hiring freezes and
+ *  rosters shed through the labour market — unpaid clerks quit. */
+export const GOV_INSOLVENT_FLOOR = -2500;
+/** the publicly-chartered transit authority (founded at RUNTIME by a
+ *  'transit-subsidy' spend order — never seeded; the private race is real). */
+export const AUTHORITY_ID = 'biz-transit-auth';
+export const AUTHORITY_NAME = 'Meridian Transit Authority';
+/** a chartering spend order below this can't capitalize an authority. */
+export const AUTHORITY_MIN_SEED = 1200;
+/** the ADMINISTERED public fare: set by charter, bypassing tâtonnement (the
+ *  setPrice gotcha) — below private marginal cost, so taxis are crowded out
+ *  unless they out-serve it; authority losses are covered by subsidy. */
+export const PUBLIC_FARE = 2.4;
+/** a commissioned civic building's construction cost (the contract budget
+ *  above it is the builder's margin). */
+export const CIVIC_COST = 4800;
+/** relief goes to households below this cash line (evenly; all if none). */
+export const RELIEF_LINE = 60;

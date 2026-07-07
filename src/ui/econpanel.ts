@@ -52,6 +52,8 @@ const EVENT_STYLE: Record<
   layoff:   { glyph: '▼', tone: 'bad' },
   evict:    { glyph: '⌂', tone: 'bad' },
   bankrupt: { glyph: '✕', tone: 'bad' },
+  tax:      { glyph: '§', tone: 'flat' },
+  'founded-public': { glyph: '✦', tone: 'good' },
 };
 
 export class EconomyPanel {

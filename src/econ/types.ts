@@ -38,11 +38,13 @@ export type BusinessId = string;
 
 /** The goods/services sectors that clear on the goods market. Housing is priced
  *  by its own market; labour by the labour market. Phase 5 adds two consumer
- *  DURABLES sectors (homegoods / apparel) served by RETAIL firms off a shelf. */
-export type Sector = 'food' | 'groceries' | 'software' | 'utilities' | 'retail' | 'homegoods' | 'apparel';
+ *  DURABLES sectors (homegoods / apparel) served by RETAIL firms off a shelf.
+ *  Phase 6 (TRANSPORT_DESIGN.md) adds 'transit' (rides — a service sector) and
+ *  'vehicles' (the dealership's retail sector for the car/bike durables). */
+export type Sector = 'food' | 'groceries' | 'software' | 'utilities' | 'retail' | 'homegoods' | 'apparel' | 'transit' | 'vehicles';
 
 /** every sector a business can operate in maps to exactly one product good. */
-export const SECTORS: Sector[] = ['food', 'groceries', 'software', 'utilities', 'retail', 'homegoods', 'apparel'];
+export const SECTORS: Sector[] = ['food', 'groceries', 'software', 'utilities', 'retail', 'homegoods', 'apparel', 'transit', 'vehicles'];
 
 /** a fresh all-zero per-sector map (SectorMap literals go stale as sectors grow). */
 export function zeroSectors(): SectorMap {
@@ -59,9 +61,10 @@ export function zeroSectors(): SectorMap {
 // ---------------------------------------------------------------------------
 export type GoodId =
   | 'produce' | 'dairy' | 'bakery' | 'meat' | 'grains' | 'drinks'
-  | 'furniture' | 'apparel';
+  | 'furniture' | 'apparel'
+  | 'car' | 'bike';
 
-export const GOODS: GoodId[] = ['produce', 'dairy', 'bakery', 'meat', 'grains', 'drinks', 'furniture', 'apparel'];
+export const GOODS: GoodId[] = ['produce', 'dairy', 'bakery', 'meat', 'grains', 'drinks', 'furniture', 'apparel', 'car', 'bike'];
 
 /** what a firm IS in the supply chain:
  *   service — sells its output straight into its sector market (phase ≤4 behaviour);
@@ -136,6 +139,10 @@ export interface BusinessConfig {
   /** retail: the shelf plan (goods stocked, demand share, shelf cap). Omitted ⇒
    *  the sector's RETAIL_SHELF template. */
   shelf?: { good: GoodId; share: number; cap: number }[];
+  /** a publicly-chartered operator sells at an ADMINISTERED price (the treasury
+   *  sets the fare, subsidies cover losses): the marginal-cost supply throttle
+   *  is off — it serves demand at whatever fare the charter fixes. */
+  administered?: boolean;
 }
 
 export interface BusinessState {
@@ -279,7 +286,8 @@ export interface Vacancy {
 /** the outcome of a labour-market tick — surfaced as events for the HUD ticker. */
 export interface LaborEvent {
   t: number;
-  kind: 'hire' | 'fire' | 'quit' | 'layoff' | 'evict' | 'bankrupt' | 'found' | 'promote';
+  kind: 'hire' | 'fire' | 'quit' | 'layoff' | 'evict' | 'bankrupt' | 'found' | 'promote'
+    | 'tax' | 'founded-public';
   agentId?: AgentId;
   agentName?: string;
   businessId?: BusinessId;
@@ -357,6 +365,14 @@ export interface ShadowHousehold {
   apparelWear?: number;       // 0..1+ apparel wear accumulator
   furnRate?: number;          // per-hour wear rate (drawn at ctor, jittered)
   apparelRate?: number;
+  // phase 6 — mobility (TRANSPORT_DESIGN.md): vehicle ownership via the same
+  // durable-wear mechanism; commute/fare demand keys off `employed` (most
+  // shadow employment is in the wider economy, employer === null).
+  ownsCar?: boolean;          // ownership gates mode availability (modal split)
+  ownsBike?: boolean;
+  vehWear?: number;           // 0..1+ vehicle wear/need accumulator
+  vehRate?: number;           // per-hour wear rate (drawn at ctor, jittered)
+  commuteNeed?: number;       // fare-demand units/day while employed (jittered)
 }
 
 /** the consumer-credit primitives the shadow sweep uses (bound to the
@@ -378,6 +394,11 @@ export interface ShadowPopView {
   aggregateDemand: number;    // total consumption units this tick
   consumerDebt: Money;        // Σ household loan balances
   defaults: number;           // cumulative consumer-credit defaults
+  // phase 6 — the aggregates TransportField.tick consumes
+  carOwners: number;          // households owning a car
+  bikeOwners: number;         // households owning a bike
+  commuteDemand: number;      // fare-demand units last tick
+  fareSpend: Money;           // fares debited last tick
 }
 
 // ---------------------------------------------------------------------------
@@ -443,8 +464,10 @@ export interface BankView {
 //   render reads `buildings` to place/grow meshes; economics read the rest.
 // ---------------------------------------------------------------------------
 /** 'commercial' is the legacy phase-4 capacity-pad kind (tolerated in old saves);
- *  new commercial construction is 'shopfront' (2 units) or 'workshop' (1, cheaper). */
-export type BuildKind = 'housing' | 'commercial' | 'shopfront' | 'workshop';
+ *  new commercial construction is 'shopfront' (2 units) or 'workshop' (1, cheaper).
+ *  'civic' is a publicly-commissioned building (a 'civic-build' spend order —
+ *  city hall etc.): no dwellings, no commercial units, no lease income. */
+export type BuildKind = 'housing' | 'commercial' | 'shopfront' | 'workshop' | 'civic';
 
 /** an authored empty plot the construction firm can build on (world coords). */
 export interface BuildLot {
@@ -560,7 +583,8 @@ export interface MonetaryView {
 //   arrays are LIVE references (never mutate); redraw when `version` changes.
 // ---------------------------------------------------------------------------
 export type EconEventKind =
-  | 'found' | 'bankrupt' | 'default' | 'policy' | 'evict' | 'boom' | 'bust';
+  | 'found' | 'bankrupt' | 'default' | 'policy' | 'evict' | 'boom' | 'bust'
+  | 'tax' | 'founded-public';
 
 export interface EconEvent {
   t: number;                  // abs sim-hours
@@ -576,6 +600,72 @@ export interface EconHistoryView {
   fields: readonly string[];  // row names, index-aligned with `data`
   data: readonly number[][];  // data[fieldIdx][sampleIdx]; live reference, read-only
   events: readonly EconEvent[]; // notable events, oldest-first, bounded
+}
+
+// ---------------------------------------------------------------------------
+// 8g. CIVIC EXECUTION — the econ side of POLIS_DESIGN's GovTickResult. The gov
+//   module DECIDES (levies, hires, spend orders); the EconomySim EXECUTES via
+//   applyCivic and returns a receipt. All money moves inside econsim.ts: taxes
+//   are per-payer debits through the three channels (Wallet / Business /
+//   ShadowPop) credited to ONE treasury balance ('gov-treasury'), which joins
+//   the privateMoney sum — the Fed must never read taxation as deflation.
+//   The treasury may deficit-finance through the Financier (real money creation).
+// ---------------------------------------------------------------------------
+export type CivicSpendKind = 'transit-subsidy' | 'civic-build' | 'relief';
+
+/** an employer-keyed FirmDemand row for PUBLIC recruitment: the orchestrator
+ *  keeps the roster + wages (treasury-paid) and feeds the row into the same
+ *  LaborMarket every firm hires through (the Construction precedent). */
+export interface CivicHireRow {
+  employerId: BusinessId;     // 'gov', or a programme id ('gov-works', …)
+  name: string;               // shows in the ticker ("hired at Town Hall")
+  wage: Money;
+  desired: number;            // target headcount (0 sheds the whole roster)
+  minSkill?: number;
+}
+
+export interface CivicEconCommands {
+  /** standing levy RATES (fractions); present ⇒ replace. Collected each econ
+   *  tick at the payWage / consumption sites and credited to the treasury. */
+  levies?: { payrollRate?: number; salesRate?: number };
+  /** present ⇒ replace the standing public-hiring rows (dropped employers'
+   *  rosters are laid off through the labour market's normal machinery). */
+  hires?: CivicHireRow[];
+  /** treasury outflows, executed now (deficit-financed if the banks allow). */
+  spendOrders?: { kind: CivicSpendKind; amount: Money }[];
+  /** fares an operator earned (from transport's tick): econ debits the riding
+   *  households and credits the operator firm — a conserved transfer. */
+  fareRevenue?: { operatorId: BusinessId; amount: Money }[];
+}
+
+export interface CivicEconReceipt {
+  clock: number;
+  treasury: Money;            // balance after execution
+  payrollTax: Money;          // accrued + credited since the last receipt
+  salesTax: Money;
+  taxCollected: Money;        // payrollTax + salesTax
+  fareCredited: Money;        // fares actually collected → operators, this call
+  spent: { kind: CivicSpendKind; amount: Money }[]; // executed (may be trimmed)
+  borrowed: Money;            // deficit finance drawn by this call
+  founded?: BusinessId;       // a public operator chartered by this call
+  commissioned?: string;      // buildingId of a civic build started
+  staff: number;              // Σ public-roster headcount
+  insolvent: boolean;         // treasury below the floor — hiring frozen
+}
+
+/** treasury readout + the explicit-carry ledger the smoke audits: at all times
+ *  treasury ≡ taxCum − payrollCum − spendCum − interestCum + borrowCum − repaidCum. */
+export interface CivicView {
+  treasury: Money;
+  levyPayroll: number;
+  levySales: number;
+  staff: number;
+  publicOperatorId?: BusinessId;
+  insolvent: boolean;
+  loanBalance: Money;         // treasury debt at the banks
+  taxCum: Money; fareCum: Money; payrollCum: Money; spendCum: Money;
+  interestCum: Money; borrowCum: Money; repaidCum: Money;
+  taxTick: Money;             // last-tick tax take (history strip)
 }
 
 // ---------------------------------------------------------------------------
@@ -598,6 +688,8 @@ export interface EconSnapshot {
   wholesale?: WholesaleView[];
   premises?: PremisesView;
   builders?: ConstructionView[];     // both construction firms, individually
+  // phase 6 — civic execution (treasury, levies, the conservation ledger)
+  civic?: CivicView;
 }
 
 // ---------------------------------------------------------------------------

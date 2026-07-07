@@ -42,6 +42,14 @@ export interface FeedMember {
   tom: number;            // theory-of-mind ∈ ~[0.05,1] — the connection-conversion gain
 }
 
+/** the gov back-channel: civic posts resonate via the READER's civic salience
+ *  (not interest lists), and every like/reply on one is reported so the opinion
+ *  field learns from real engagement. likes[] doubles as the signature list. */
+export interface CivicFeedHook {
+  salienceOf: (id: string) => number;
+  onEngage: (readerId: string, kind: string, authorId: string) => void;
+}
+
 const MAX_POSTS = 60;         // ring buffer
 const MAX_COMMENTS = 8;       // per post
 const FEED_BEAT = 0.12;       // sim-hours between feed beats (mirrors society EVENT_INT)
@@ -68,7 +76,7 @@ export class PublicFeed {
   private belongingBump = new Map<string, number>(); // member id → belonging delta this drain window
 
   /** advance the feed. Call once per society tick with the current participants. */
-  step(dt: number, env: { clock: number; rng: () => number }, members: FeedMember[]): void {
+  step(dt: number, env: { clock: number; rng: () => number }, members: FeedMember[], civic?: CivicFeedHook): void {
     for (const [id, cd] of this.cooldown) this.cooldown.set(id, Math.max(0, cd - dt));
     this.beatAcc += dt;
     if (this.beatAcc < FEED_BEAT) return;
@@ -100,14 +108,33 @@ export class PublicFeed {
       // most-recent first, look at a handful
       for (const p of fresh.slice(-6).reverse()) {
         const author = members.find((x) => x.id === p.authorId);
-        const res = this.resonance(m, p, author, clock);
-        if (res > LIKE_TH && !p.likes.includes(m.id)) p.likes.push(m.id);
+        const res = this.resonance(m, p, author, clock, civic);
+        if (res > LIKE_TH && !p.likes.includes(m.id)) {
+          p.likes.push(m.id);   // on a petition this IS a signature
+          if (p.kind && civic) civic.onEngage(m.id, p.kind, p.authorId);
+        }
         if (res > REPLY_TH && replyBudget > 0 && author) {
           this.reply(m, p, author, clock, rng);
+          if (p.kind && civic) civic.onEngage(m.id, p.kind, p.authorId);
           replyBudget--;
         }
       }
     }
+  }
+
+  // ---- civic injection --------------------------------------------------------
+  /** place a civic post (petition / announcement / ballot / result) on the feed.
+   *  It enters the same ring buffer and the same scroll loop as any post — no
+   *  privileged surfacing; a ballot posted at night can be buried like anything. */
+  inject(post: { kind: string; authorId: string; authorName: string; hatColor: number; topic: string; text: string; valence: number }, clock: number): void {
+    const rec: PostRec = {
+      id: fid('p'), authorId: post.authorId, authorName: post.authorName, hatColor: post.hatColor,
+      t: clock, topic: post.topic, text: post.text, valence: clamp(post.valence, -1, 1),
+      likes: [], comments: [], cashedLikes: 0, kind: post.kind,
+    };
+    this.posts.push(rec);
+    this.postCount++;
+    if (this.posts.length > MAX_POSTS) this.posts.shift();
   }
 
   // ---- authoring ------------------------------------------------------------
@@ -175,7 +202,10 @@ export class PublicFeed {
       }
       if (newLikes <= 0 && uncashed === 0) continue;
       p.cashedLikes = p.likes.length;
-      const value = K_LIKE * newLikes + K_REPLY * replyWarm;
+      // a signature on your petition validates harder than a like on a post —
+      // civic efficacy rides the SAME being-heard channel, just weighted.
+      const kLike = p.kind === 'petition' ? K_LIKE * 2 : K_LIKE;
+      const value = kLike * newLikes + K_REPLY * replyWarm;
       // connection conversion is gated by theory-of-mind: the same likes/replies
       // land as real warmth for a high-ToM mind, and barely register for a low one.
       const felt = value * m.tom;
@@ -195,13 +225,16 @@ export class PublicFeed {
   private findMemberless(_p: PostRec): FeedMember | null { return null; }
 
   // ---- emergent engagement scoring -----------------------------------------
-  private resonance(reader: FeedMember, post: PostRec, author: FeedMember | undefined, clock: number): number {
+  private resonance(reader: FeedMember, post: PostRec, author: FeedMember | undefined, clock: number, civic?: CivicFeedHook): number {
     const interestHit = sharedInterests(reader.interests, [post.topic]).length > 0 ? 1 : 0.2;
     const aff = author ? Math.max(0, reader.ledger.get(author.id)?.affection ?? 0) : 0;
     const compat = author ? bigFiveCompat(reader.ch.profile.bigFive, author.ch.profile.bigFive) : 0.5;
     const moodFit = 1 - Math.abs(reader.ch.soma.valence - post.valence) / 2;
     const recency = Math.pow(0.9, Math.max(0, clock - post.t));
-    return 0.9 * interestHit + 0.7 * aff + 0.5 * (compat - 0.5) + 0.4 * moodFit + 0.3 * recency;
+    // civic term: a petition lands exactly as hard as civics are on the reader's
+    // mind (the gov-side salience) — interest lists never mention 'civic:rent'.
+    const civicFit = post.kind && civic ? 0.15 + 0.85 * clamp(civic.salienceOf(reader.id), 0, 1) : 0;
+    return 0.9 * interestHit + 0.7 * aff + 0.5 * (compat - 0.5) + 0.4 * moodFit + 0.3 * recency + 0.9 * civicFit;
   }
 
   private expressiveUrge(m: FeedMember): number {
@@ -237,6 +270,7 @@ export class PublicFeed {
       id: p.id, authorId: p.authorId, authorName: p.authorName, hatColor: p.hatColor,
       t: p.t, topic: p.topic, text: p.text, valence: p.valence,
       likes: p.likes.slice(), comments: p.comments.map((c) => ({ ...c })),
+      ...(p.kind ? { kind: p.kind } : {}),
     }));
     return { posts, postCount: this.postCount };
   }

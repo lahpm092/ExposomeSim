@@ -17,6 +17,7 @@ import type {
   AgentId, BusinessId, Sector, Wallet, EconSnapshot, EconStepCtx, BusinessConfig,
   MacroAggregates, SectorMap, LaborCandidate, FirmDemand, AgentEconView, LaborEvent,
   ConsumerCredit, GoodId, Building, SupermarketView, ConstructionView,
+  CivicEconCommands, CivicEconReceipt, CivicHireRow, CivicSpendKind, CivicView, Money,
 } from './types';
 import { SECTORS, GOODS, zeroSectors } from './types';
 import { createWallet, payWage, buy, chargeRent, evict, rehouse, growSkill, hire, fire, setTraining } from './wallet';
@@ -44,15 +45,18 @@ import {
   ENTRY_EQUITY_CAP_CHAIN, ENTRY_LOAN_MULT_CHAIN,
   TIERA_DURABLE_TRICKLE, CONSTRUCTION_FIRMS, CONSTRUCTION_CREW_SPLIT,
   SEED_PREMISES, SHOPFRONT_RENT, WORKSHOP_RENT, PENDING_ENTRY_CAP, BOOM_WARMUP_H,
+  TIERA_FARE_TRICKLE, GOV_TREASURY_ID, LEVY_MAX, GOV_CUSHION, GOV_INSOLVENT_FLOOR,
+  AUTHORITY_ID, AUTHORITY_NAME, AUTHORITY_MIN_SEED, PUBLIC_FARE,
 } from './config';
 import { clamp, mulberry32, type RNG } from '../core/util/num';
 
-const CONSUMER_SECTORS: Sector[] = ['food', 'groceries', 'utilities', 'retail', 'homegoods', 'apparel'];
+const CONSUMER_SECTORS: Sector[] = ['food', 'groceries', 'utilities', 'retail', 'homegoods', 'apparel', 'transit', 'vehicles'];
 
-/** save schema version: <5 predates the supply chain (phase-5 seeded firms must
- *  survive loading such a save — they are new, not exited). */
-const ECON_SAVE_V = 5;
+/** save schema version: <5 predates the supply chain, <6 the mobility firms —
+ *  seeded firms absent from an older save are NEW (not exited): keep them. */
+const ECON_SAVE_V = 6;
 const PHASE5_SEED_IDS = new Set<BusinessId>(['biz-market', 'biz-bakehouse', 'biz-alderplane']);
+const PHASE6_SEED_IDS = new Set<BusinessId>(['biz-dealership', 'biz-taxi']);
 
 /** a fresh all-zero per-good map. */
 function zeroGoods(): Record<GoodId, number> {
@@ -115,6 +119,21 @@ export class EconomySim {
   private boomRegime = 0;                        // -1 bust / 0 normal / +1 boom (event edges)
   private wealthScratch: number[] = [];          // reused for gini/percentiles
   private wealthPct = { p10: 0, p25: 0, p50: 0, p75: 0, p90: 0 };
+  // ---- phase 6: civic execution (POLIS_DESIGN) -------------------------------
+  // Treasury = a cash balance INSIDE econ (account 'gov-treasury' at the banks).
+  // Every mutation pairs with exactly one cum bucket, so at ALL times
+  //   treasury ≡ taxCum − payrollCum − spendCum − interestCum + borrowCum − repaidCum
+  // — the explicit-carry conservation ledger the smoke audits.
+  private treasuryCash: Money = 0;
+  private levyPayroll = 0;                       // standing levy rates (applyCivic sets)
+  private levySales = 0;
+  private govHires: CivicHireRow[] = [];         // standing public-hiring rows
+  private govRosters = new Map<string, { id: AgentId; wage: Money }[]>();
+  private publicOperatorId: BusinessId | null = null;
+  private pendPayrollTax = 0;                    // accrued since the last receipt
+  private pendSalesTax = 0;
+  private civicCum = { tax: 0, fares: 0, payroll: 0, spend: 0, interest: 0, borrow: 0, repaid: 0 };
+  private taxTick = 0;                           // last-tick tax take (history)
 
   constructor(agents: EconAgentSpec[], opts: { seed?: number; clock?: number } = {}) {
     const clock = opts.clock ?? 0;
@@ -264,29 +283,52 @@ export class EconomySim {
     const prices = this.sectorPrices();
     const demand: SectorMap = zeroSectors();
 
+    this.taxTick = 0;
+
     // --- Tier-A (the 17 non-Mara full-res agents): wages, cost-of-living, rent, skill
     for (const inp of ctx.agents) {
       const w = this.wallets.get(inp.id);
       if (!w || inp.id === this.maraId) continue;   // Mara handled by her legacy ledger
+                                                    // (this ALSO exempts her from levies —
+                                                    //  her wallet mirrors the legacy ledger)
 
       // income: employed AND at work. Construction crews work off-site (no rendered
-      // venue) so they earn full-time whenever employed by either builder.
+      // venue) so they earn full-time whenever employed by either builder; public
+      // rosters (gov clerks) likewise have no rendered venue.
       const constr = w.employer !== null && this.builderById(w.employer) !== undefined;
-      if (w.employer && w.status === 'employed' && (inp.atWork || constr)) {
-        payWage(w, (constr ? 1 : (inp.workHours || 0)) * dt);   // personal income ledger
+      const pub = w.employer !== null && this.govRosters.has(w.employer);
+      if (w.employer && w.status === 'employed' && (inp.atWork || constr || pub)) {
+        const earned = payWage(w, ((constr || pub) ? 1 : (inp.workHours || 0)) * dt);
+        // payroll levy → treasury (the stepMonetary collection pattern: debit
+        // the payer's real cash, credit ONE treasury balance).
+        if (this.levyPayroll > 0 && earned > 0) {
+          const tax = this.levyPayroll * earned;
+          w.money -= tax; w.spent += tax;
+          this.govTax(tax, true);
+        }
       } else if (!w.employer) {
         setTraining(w, true);                        // unemployed → upskill while searching
       }
 
       // cost of living at CURRENT market prices (this is "spend money on food/water")
+      const spent0 = w.spent;
       const foodUnits = inp.hunger * MEALS_PER_DAY * (dt / 24) + 0.03 * dt;
       demand.food += buy(w, foodUnits, prices.food);
       const waterUnits = inp.thirst * WATER_PER_DAY * (dt / 24) + 0.06 * dt;
       demand.utilities += buy(w, waterUnits, prices.utilities);
-      if (w.status === 'employed') demand.retail += buy(w, 0.04 * dt, prices.retail); // small discretionary
+      if (w.status === 'employed') {
+        demand.retail += buy(w, 0.04 * dt, prices.retail); // small discretionary
+        demand.transit += buy(w, TIERA_FARE_TRICKLE * dt, prices.transit); // commute fares
+      }
       // durables: Tier-A agents contribute a simple slow replacement trickle.
       demand.homegoods += buy(w, TIERA_DURABLE_TRICKLE * dt, prices.homegoods);
       demand.apparel += buy(w, TIERA_DURABLE_TRICKLE * dt, prices.apparel);
+      // sales levy on this tick's consumption (buy() booked it into w.spent).
+      if (this.levySales > 0 && w.spent > spent0) {
+        const tax = this.levySales * (w.spent - spent0);
+        w.money -= tax; w.spent += tax;
+        this.govTax(tax, false);
+      }
 
       // rent → possible eviction → homelessness; recovery re-houses
       chargeRent(w, clock);
@@ -300,7 +342,12 @@ export class EconomySim {
     // a live consumer-credit line into the banking system. Groceries are handled
     // separately (physiological shopping trips → the supermarket), so fold in
     // every sector EXCEPT groceries here.
-    this.shadow.step({ dtHours: dt, clock, rng: this.rng }, this.macro, prices, this.housing.rent, this.credit);
+    this.shadow.step({ dtHours: dt, clock, rng: this.rng }, this.macro, prices, this.housing.rent, this.credit,
+      this.levyPayroll > 0 || this.levySales > 0 ? { payroll: this.levyPayroll, sales: this.levySales } : null);
+    // the sweep debited each household's levy; credit the treasury with exactly that.
+    const st = this.shadow.collectTaxes();
+    this.govTax(st.payroll, true);
+    this.govTax(st.sales, false);
     if (this.shadow.defaultsThisTick > 0) {
       this.history.event(clock, 'default',
         `${this.shadow.defaultsThisTick} household default${this.shadow.defaultsThisTick > 1 ? 's' : ''}`,
@@ -408,8 +455,15 @@ export class EconomySim {
         ? offer + Math.min(shelfSum, Math.max(0, demand[s] * slack - offer))
         : offer;
       // a market with NO seller has no price discovery: freeze the price (the
-      // shortage still records and screams for entry — see market.ts).
-      const { price, sold } = mkt.clear(demand[s], supply, services.length + retailers.length > 0);
+      // shortage still records and screams for entry — see market.ts). A
+      // PUBLICLY-CHARTERED transit operator ADMINISTERS the fare instead:
+      // price discovery off, the treasury's sticker rules the sector (the
+      // setPrice gotcha — administered fares must bypass tâtonnement).
+      const administered = s === 'transit'
+        && this.publicOperatorId !== null && this.bizById.has(this.publicOperatorId);
+      if (administered) mkt.administer(PUBLIC_FARE);
+      const { price, sold } = mkt.clear(demand[s], supply,
+        services.length + retailers.length > 0 && !administered);
       gdp += sold * price;
       // sales split pro-rata by what each seller OFFERED; the demand each firm
       // gets to SEE (for its expectation) splits by capacity, so under-producers
@@ -515,7 +569,9 @@ export class EconomySim {
           });
         }
         this.pushEvent(clock, 'found', undefined, c.id,
-          `${c.name.split(' ')[0]} finished a ${b.kind === 'housing' ? `${b.dwellings}-home block` : `${b.kind} (${nUnits} unit${nUnits > 1 ? 's' : ''})`}`);
+          `${c.name.split(' ')[0]} finished a ${b.kind === 'housing' ? `${b.dwellings}-home block`
+            : b.kind === 'civic' ? 'civic hall'
+              : `${b.kind} (${nUnits} unit${nUnits > 1 ? 's' : ''})`}`);
       }
     }
 
@@ -523,6 +579,9 @@ export class EconomySim {
     this.rebuildSkillCache(ctx);
     const plan = this.labor.plan(this.firmDemands(), this.candidates(ctx), clock, this.rng);
     this.applyPlan(plan);
+
+    // --- civic: treasury pays its rosters + services its debt (POLIS wiring)
+    this.stepCivic(dt);
 
     // --- housing occupancy → rent adjustment
     const housedShadow = this.shadow.count() - this.shadow.homelessCount();
@@ -567,7 +626,11 @@ export class EconomySim {
       let paid = 0;
       const builder = this.builderById(id);
       if (builder) paid = builder.debit(amt);
-      else {
+      else if (id === GOV_TREASURY_ID) {                     // debt service on gov bonds
+        paid = Math.min(amt, Math.max(0, this.treasuryCash));
+        this.treasuryCash -= paid;
+        this.civicCum.interest += paid;
+      } else {
         const b = this.bizById.get(id);
         if (b) { const d = Math.min(amt, Math.max(0, b.cash)); b.addCash(-d); paid = d; }
         else paid = this.shadow.debitCash(id, amt);          // household borrowers
@@ -589,7 +652,10 @@ export class EconomySim {
       }
     }
     // 4) broad money = the money the public actually holds → run the banking tick.
-    let priv = 0;
+    //    THE critical civic invariant: the treasury joins this sum — leave it out
+    //    and the Fed reads every tax take as money destruction (deflation) and
+    //    the Taylor rule ratchets rates against a phantom slump.
+    let priv = this.treasuryCash;
     for (const w of this.wallets.values()) priv += w.money;
     for (const b of this.businesses) priv += b.cash;
     for (const c of this.builders) priv += c.cashOnHand;
@@ -667,6 +733,11 @@ export class EconomySim {
       pendingPremises: pv.pending,
       commercialUnits: pv.units,
       makerCount, retailCount,
+      // phase 6 — mobility + civic
+      carOwners: sv.carOwners, bikeOwners: sv.bikeOwners,
+      commuteDemand: sv.commuteDemand, fareSpend: sv.fareSpend,
+      taxTake: this.taxTick, treasury: this.treasuryCash,
+      govStaff: this.govStaffCount(),
     };
     for (const mk of this.goods.values()) {
       const v = mk.view();
@@ -703,7 +774,33 @@ export class EconomySim {
         skillOf: (id: AgentId) => this.skillOf(id),
       });
     }
+    // public recruitment (POLIS): each standing CivicHireRow joins as an
+    // employer-keyed FirmDemand and hires through the SAME market as every
+    // firm (the Construction precedent — sector unused in matching). An
+    // insolvent treasury freezes hiring and sheds every roster to zero:
+    // unpaid clerks quit through the ordinary layoff machinery.
+    const govSolvent = this.treasuryCash > GOV_INSOLVENT_FLOOR;
+    for (const row of this.govHires) {
+      const roster = this.govRosters.get(row.employerId) ?? [];
+      list.push({
+        id: row.employerId, name: row.name, sector: 'utilities' /* unused in matching */,
+        wage: row.wage, headcount: roster.length,
+        desired: govSolvent ? Math.max(0, row.desired | 0) : 0,
+        solvent: govSolvent, minSkill: row.minSkill ?? 0.05,
+        workers: roster.map((r) => r.id),
+        skillOf: (id: AgentId) => this.skillOf(id),
+      });
+    }
     return list;
+  }
+
+  /** remove a worker from whichever public roster holds them (if any). */
+  private govRosterRemove(employerId: BusinessId, agentId: AgentId): boolean {
+    const roster = this.govRosters.get(employerId);
+    if (!roster) return false;
+    const i = roster.findIndex((r) => r.id === agentId);
+    if (i >= 0) roster.splice(i, 1);
+    return true;
   }
 
   /** which construction firm (if any) an account id belongs to. */
@@ -729,7 +826,9 @@ export class EconomySim {
       if (f.agentId === this.maraId) continue;   // the protagonist is never laid off
       const fc = this.builderById(f.businessId);
       if (fc) fc.removeWorker(f.agentId);
-      else this.bizById.get(f.businessId)?.removeWorker(f.agentId);
+      else if (!this.govRosterRemove(f.businessId, f.agentId)) {
+        this.bizById.get(f.businessId)?.removeWorker(f.agentId);
+      }
       const w = this.wallets.get(f.agentId);
       if (w) { fire(w); setTraining(w, true); } else this.shadow.applyFire(f.agentId);
     }
@@ -739,10 +838,14 @@ export class EconomySim {
       if (h.prevEmployer) {
         const pc = this.builderById(h.prevEmployer);
         if (pc) pc.removeWorker(h.agentId);
-        else this.bizById.get(h.prevEmployer)?.removeWorker(h.agentId);
+        else if (!this.govRosterRemove(h.prevEmployer, h.agentId)) {
+          this.bizById.get(h.prevEmployer)?.removeWorker(h.agentId);
+        }
       }
       const hc = this.builderById(h.businessId);
+      const gr = this.govRosters.get(h.businessId);
       if (hc) hc.addWorker(h.agentId);
+      else if (gr) gr.push({ id: h.agentId, wage: h.wage });
       else { const b = this.bizById.get(h.businessId); if (!b) continue; b.addWorker(h.agentId); }
       const w = this.wallets.get(h.agentId);
       if (w) hire(w, h.businessId, h.wage); else this.shadow.applyHire(h.agentId, h.businessId, h.wage);
@@ -770,6 +873,247 @@ export class EconomySim {
     }
   }
 
+  // ===================== civic execution (POLIS_DESIGN) ====================
+  /** credit a levy to the treasury — the ONLY tax-side treasury mutation, so
+   *  balance and ledger move in lockstep (the smoke audits the identity). */
+  private govTax(amt: Money, payroll: boolean): void {
+    if (amt <= 0) return;
+    this.treasuryCash += amt;
+    this.civicCum.tax += amt;
+    this.taxTick += amt;
+    if (payroll) this.pendPayrollTax += amt;
+    else this.pendSalesTax += amt;
+  }
+
+  /** treasury outflow (spends, payroll) — paired with its ledger bucket. */
+  private govSpend(amt: Money, bucket: 'payroll' | 'spend'): void {
+    if (amt <= 0) return;
+    this.treasuryCash -= amt;
+    this.civicCum[bucket] += amt;
+  }
+
+  /** per-tick treasury housekeeping: pay every public roster (the household
+   *  side accrues in the Tier-A loop / shadow sweep — this is the paired
+   *  debit), then service debt: borrow when overdrawn (deficit = real money
+   *  creation via the Financier), repay when flush. */
+  private stepCivic(dt: number): void {
+    let payroll = 0;
+    for (const row of this.govHires) {
+      const roster = this.govRosters.get(row.employerId);
+      if (!roster) continue;
+      for (const r of roster) payroll += r.wage * dt;
+    }
+    this.govSpend(payroll, 'payroll');
+    if (this.treasuryCash < 0) {
+      const lent = this.monetary.borrow(GOV_TREASURY_ID, -this.treasuryCash);
+      this.treasuryCash += lent;
+      this.civicCum.borrow += lent;
+      // if the banks ration (thin capital), the treasury stays overdrawn —
+      // past the floor firmDemands() freezes hiring and the rosters shed.
+    } else if (this.treasuryCash > GOV_CUSHION) {
+      const owed = this.monetary.loanBalance(GOV_TREASURY_ID);
+      if (owed > 0) {
+        const paid = this.monetary.repay(GOV_TREASURY_ID,
+          Math.min(owed, (this.treasuryCash - GOV_CUSHION) * 0.5));
+        this.treasuryCash -= paid;
+        this.civicCum.repaid += paid;
+      }
+    }
+  }
+
+  /**
+   * Execute a gov tick's economics (the econ side of POLIS_DESIGN's
+   * GovTickResult): set levies, replace the public-hiring rows, run spend
+   * orders (treasury-funded, deficit-financed when the banks allow), and
+   * settle operator fare revenue. Returns a receipt; the accrued levies
+   * (collected at the payWage/consumption sites each econ tick) drain into it.
+   */
+  applyCivic(cmds: CivicEconCommands, clock: number): CivicEconReceipt {
+    // 1) levies: standing rates, clamped (log a 'tax' event on a real change).
+    if (cmds.levies) {
+      const p = clamp(cmds.levies.payrollRate ?? this.levyPayroll, 0, LEVY_MAX);
+      const s = clamp(cmds.levies.salesRate ?? this.levySales, 0, LEVY_MAX);
+      if (Math.abs(p - this.levyPayroll) > 1e-9 || Math.abs(s - this.levySales) > 1e-9) {
+        this.history.event(clock, 'tax',
+          `levies set — payroll ${(p * 100).toFixed(0)}% · sales ${(s * 100).toFixed(0)}%`, p + s);
+        this.pushEvent(clock, 'tax', undefined, undefined,
+          `town levies: ${(p * 100).toFixed(0)}% payroll · ${(s * 100).toFixed(0)}% sales`);
+      }
+      this.levyPayroll = p;
+      this.levySales = s;
+    }
+    // 2) hires: REPLACE the standing rows; rosters of dropped employers are
+    //    laid off on the spot (their FirmDemand disappears, so the market
+    //    could never shed them — do it here, conserving nothing but jobs).
+    if (cmds.hires) {
+      this.govHires = cmds.hires.map((r) => ({ ...r }));
+      const keep = new Set(this.govHires.map((r) => r.employerId));
+      for (const [emp, roster] of [...this.govRosters]) {
+        if (keep.has(emp)) continue;
+        for (const r of roster) {
+          const w = this.wallets.get(r.id);
+          if (w) { fire(w); setTraining(w, true); } else this.shadow.applyFire(r.id);
+        }
+        this.govRosters.delete(emp);
+      }
+      for (const r of this.govHires) {
+        if (!this.govRosters.has(r.employerId)) this.govRosters.set(r.employerId, []);
+      }
+    }
+    // 3) fares: debit the riding households, credit the operator — a conserved
+    //    transfer (transport computes ridership; econ moves the money).
+    let fareCredited = 0;
+    for (const f of cmds.fareRevenue ?? []) {
+      if (!(f.amount > 0)) continue;
+      const op = this.bizById.get(f.operatorId);
+      if (!op) continue;
+      const collected = this.shadow.debitFares(f.amount);
+      if (collected > 0) {
+        op.receiveSubsidy(collected);   // booked as revenue — it IS revenue
+        fareCredited += collected;
+        this.civicCum.fares += collected;
+      }
+    }
+    // 4) spend orders — each treasury-funded, borrowing the shortfall first.
+    const spent: { kind: CivicSpendKind; amount: Money }[] = [];
+    let borrowed = 0;
+    let founded: BusinessId | undefined;
+    let commissioned: string | undefined;
+    for (const so of cmds.spendOrders ?? []) {
+      if (!(so.amount > 0)) continue;
+      if (this.treasuryCash < so.amount) {
+        const lent = this.monetary.borrow(GOV_TREASURY_ID, so.amount - this.treasuryCash);
+        this.treasuryCash += lent;
+        this.civicCum.borrow += lent;
+        borrowed += lent;
+      }
+      const amt = Math.min(so.amount, Math.max(0, this.treasuryCash));
+      if (amt <= 1e-9) continue;
+      switch (so.kind) {
+        case 'relief': {
+          const out = this.shadow.relief(amt);
+          this.govSpend(out, 'spend');
+          if (out > 0) spent.push({ kind: so.kind, amount: out });
+          break;
+        }
+        case 'transit-subsidy': {
+          const op = this.publicOperatorId ? this.bizById.get(this.publicOperatorId) : undefined;
+          if (op) {
+            // an operating grant for the standing authority.
+            op.receiveSubsidy(amt);
+            this.govSpend(amt, 'spend');
+            spent.push({ kind: so.kind, amount: amt });
+          } else if (amt >= AUTHORITY_MIN_SEED) {
+            // no authority yet: the order CHARTERS one from treasury funds —
+            // the public founding channel, bypassing the entrepreneur wealth
+            // gate and cooldown (TRANSPORT_DESIGN: the race with a private
+            // founder is real; whichever fires first takes the sector slot).
+            founded = this.foundPublicOperator(amt, clock);
+            if (founded) {
+              this.govSpend(amt, 'spend');
+              spent.push({ kind: so.kind, amount: amt });
+            }
+          }
+          break;
+        }
+        case 'civic-build': {
+          // flow a 'civic' BuildKind through the existing Construction
+          // pipeline: real lot, real crew-hours — the least-busy builder
+          // takes the contract, paid the whole budget up front.
+          const builder = [...this.builders].sort(
+            (a, b) => a.view().activeProjects - b.view().activeProjects)[0];
+          const bld = builder?.commission('civic', amt, clock, this.rng);
+          if (bld) {
+            this.govSpend(amt, 'spend');
+            spent.push({ kind: so.kind, amount: amt });
+            commissioned = bld.id;
+            this.pushEvent(clock, 'found', undefined, builder.id,
+              `${builder.name.split(' ')[0]} breaks ground on a civic hall (public works)`);
+            this.history.event(clock, 'found', 'civic hall commissioned', amt);
+          }
+          break;
+        }
+      }
+    }
+    // 5) the receipt: drain the accrued levies + report this call's execution.
+    const payrollTax = this.pendPayrollTax;
+    const salesTax = this.pendSalesTax;
+    this.pendPayrollTax = 0;
+    this.pendSalesTax = 0;
+    return {
+      clock,
+      treasury: this.treasuryCash,
+      payrollTax, salesTax,
+      taxCollected: payrollTax + salesTax,
+      fareCredited,
+      spent,
+      borrowed,
+      founded,
+      commissioned,
+      staff: this.govStaffCount(),
+      insolvent: this.treasuryCash <= GOV_INSOLVENT_FLOOR,
+    };
+  }
+
+  /** charter the transit authority from treasury funds (public founding). */
+  private foundPublicOperator(seed: Money, clock: number): BusinessId | undefined {
+    if (this.bizById.has(AUTHORITY_ID)) return undefined;
+    const t = SECTOR_TEMPLATES.transit;
+    const cfg: BusinessConfig = {
+      id: AUTHORITY_ID,
+      name: AUTHORITY_NAME,
+      sector: 'transit',
+      seedCash: seed,
+      basePrice: PUBLIC_FARE,          // the charter's fare, administered
+      unitCost: t.unitCost * 0.8,      // no profit margin baked in — it's public
+      capacityPerWorker: t.capacityPerWorker,
+      baseWage: t.baseWage,
+      commercialRent: t.commercialRent,
+      founderIds: [],
+      maxHeadcount: 6,
+      kind: 'service',
+      archetype: 'depot',
+      administered: true,              // serves at the set fare, never throttles
+    };
+    const b = new Business(cfg, clock);
+    this.registerBusiness(b, cfg);     // entrantCfg round-trips it through saves
+    this.publicOperatorId = b.id;
+    this.firmBirths++;
+    this.pushEvent(clock, 'founded-public', undefined, b.id,
+      `${cfg.name} chartered — publicly funded, fares administered`);
+    this.history.event(clock, 'founded-public', `${cfg.name} chartered`, seed);
+    return b.id;
+  }
+
+  private govStaffCount(): number {
+    let n = 0;
+    for (const roster of this.govRosters.values()) n += roster.length;
+    return n;
+  }
+
+  /** the shadow aggregates + fare price TransportField.tick consumes. */
+  transportAggregates(): { carOwners: number; bikeOwners: number; commuteDemand: number; fareSpend: Money; fare: Money } {
+    const t = this.shadow.transportAggregates();
+    return { ...t, fare: this.goods.get('transit')!.price };
+  }
+
+  private civicView(): CivicView {
+    return {
+      treasury: this.treasuryCash,
+      levyPayroll: this.levyPayroll,
+      levySales: this.levySales,
+      staff: this.govStaffCount(),
+      publicOperatorId: this.publicOperatorId ?? undefined,
+      insolvent: this.treasuryCash <= GOV_INSOLVENT_FLOOR,
+      loanBalance: this.monetary.loanBalance(GOV_TREASURY_ID),
+      taxCum: this.civicCum.tax, fareCum: this.civicCum.fares,
+      payrollCum: this.civicCum.payroll, spendCum: this.civicCum.spend,
+      interestCum: this.civicCum.interest, borrowCum: this.civicCum.borrow,
+      repaidCum: this.civicCum.repaid,
+      taxTick: this.taxTick,
+    };
+  }
+
   // ===================== firm demography (entry/exit) ======================
   /** dissolve a bankrupt firm: everyone laid off, loans written off against the
    *  bank's capital, residual cash liquidated to the owner. */
@@ -792,6 +1136,9 @@ export class EconomySim {
     const arr = this.bySector.get(b.sector);
     if (arr) { const k = arr.indexOf(b); if (k >= 0) arr.splice(k, 1); }
     this.entrantCfg.delete(b.id);
+    // a dissolved public operator ends the administered-fare regime; a later
+    // spend order may charter a successor (institutions can fail — POLIS).
+    if (this.publicOperatorId === b.id) this.publicOperatorId = null;
     this.firmDeaths++;
     this.pushEvent(clock, 'bankrupt', undefined, undefined, `${b.name} dissolved — ${loss > 0 ? `$${loss.toFixed(0)} written off` : 'doors closed'}`);
   }
@@ -1045,6 +1392,7 @@ export class EconomySim {
       wholesale: GOODS.map((g) => this.wholesale.get(g)!.view()),
       premises: this.premises.view(),
       builders: this.builders.map((c) => c.view()),
+      civic: this.civicView(),
     };
   }
 
@@ -1143,13 +1491,24 @@ export class EconomySim {
         entrantSeq: this.entrantSeq, owners: [...this.owners], shortEMA: { ...this.shortEMA },
         wsShortEMA: { ...this.wsShortEMA },
       },
+      civic: {
+        treasury: this.treasuryCash,
+        levyPayroll: this.levyPayroll, levySales: this.levySales,
+        hires: this.govHires.map((r) => ({ ...r })),
+        rosters: [...this.govRosters.entries()].map(([k, v]) => [k, v.map((r) => ({ ...r }))] as [string, { id: AgentId; wage: number }[]]),
+        publicOperatorId: this.publicOperatorId ?? undefined,
+        pendPayrollTax: this.pendPayrollTax, pendSalesTax: this.pendSalesTax,
+        cum: { ...this.civicCum },
+        taxTick: this.taxTick,
+      },
     };
   }
   loadJSON(j: EconJSON): void {
     if (!j) return;
-    // pre-phase-5 saves predate the seeded supply-chain firms: their absence
-    // from the save means "not born yet", never "exited" — keep them.
-    const legacy = (j.v ?? 4) < ECON_SAVE_V;
+    // older saves predate later phases' seeded firms: absence from such a save
+    // means "not born yet", never "exited" — keep them (per-phase versioning).
+    const preP5 = (j.v ?? 4) < 5;
+    const preP6 = (j.v ?? 4) < 6;
     for (const [id, w] of j.wallets) { const cur = this.wallets.get(id); if (cur) Object.assign(cur, w); else this.wallets.set(id, w); }
     // firm demography round-trip: drop firms the save doesn't have (they exited
     // before it was taken), rebuild entrants from their stored configs.
@@ -1157,7 +1516,8 @@ export class EconomySim {
     for (let i = this.businesses.length - 1; i >= 0; i--) {
       const b = this.businesses[i];
       if (savedIds.has(b.id)) continue;
-      if (legacy && PHASE5_SEED_IDS.has(b.id)) continue;
+      if (preP5 && PHASE5_SEED_IDS.has(b.id)) continue;
+      if (preP6 && PHASE6_SEED_IDS.has(b.id)) continue;
       this.businesses.splice(i, 1);
       this.bizById.delete(b.id);
       const arr = this.bySector.get(b.sector);
@@ -1187,7 +1547,7 @@ export class EconomySim {
     // buildings). j.extraCap (the old commercial capacity pad) is deliberately
     // IGNORED: premises replaced it.
     this.restoreSeedBuildings();
-    if (legacy && j.supermarket) this.loadLegacySupermarket(j.supermarket);
+    if (preP5 && j.supermarket) this.loadLegacySupermarket(j.supermarket);
     if (j.physio) this.physio.loadJSON(j.physio);
     this.macro = { ...this.freshMacro(j.macro?.clock ?? 0), ...j.macro };
     this.acc = j.acc; this.cpiPrev = j.cpiPrev; this.gdpEMA = j.gdpEMA;
@@ -1206,6 +1566,21 @@ export class EconomySim {
     // registry (older or partial save) doesn't already track.
     for (const b of this.businesses) {
       if (b.pendingPremises && !this.premises.pendingIds.includes(b.id)) this.premises.enqueue(b.id);
+    }
+    // civic state (absent on pre-phase-6 saves = no government born yet).
+    if (j.civic) {
+      const c = j.civic;
+      this.treasuryCash = c.treasury ?? 0;
+      this.levyPayroll = c.levyPayroll ?? 0;
+      this.levySales = c.levySales ?? 0;
+      this.govHires = Array.isArray(c.hires) ? c.hires.map((r) => ({ ...r })) : [];
+      this.govRosters.clear();
+      for (const [k, v] of c.rosters ?? []) this.govRosters.set(k, v.map((r) => ({ ...r })));
+      this.publicOperatorId = c.publicOperatorId ?? null;
+      this.pendPayrollTax = c.pendPayrollTax ?? 0;
+      this.pendSalesTax = c.pendSalesTax ?? 0;
+      if (c.cum) this.civicCum = { ...this.civicCum, ...c.cum };
+      this.taxTick = c.taxTick ?? 0;
     }
     this.prevPolicyAtEvent = this.monetary.policyRate;
     if (this.rng.load) this.rng.load(j.rng);
@@ -1271,6 +1646,16 @@ export interface EconJSON {
     births: number; deaths: number; lastEntryAt: number; entrantSeq: number;
     owners: AgentId[]; shortEMA: SectorMap;
     wsShortEMA?: Record<GoodId, number>;
+  };
+  /** phase 6 — civic execution state (absent = no government born yet). */
+  civic?: {
+    treasury: number; levyPayroll: number; levySales: number;
+    hires: CivicHireRow[];
+    rosters: [string, { id: AgentId; wage: number }[]][];
+    publicOperatorId?: string;
+    pendPayrollTax: number; pendSalesTax: number;
+    cum?: { tax: number; fares: number; payroll: number; spend: number; interest: number; borrow: number; repaid: number };
+    taxTick?: number;
   };
 }
 

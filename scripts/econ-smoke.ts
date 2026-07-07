@@ -1,7 +1,12 @@
 // Headless proof that the market ECONOMY emerges (no scripting) and that the
 // memory embedding tier works offline. Run: npx tsx scripts/econ-smoke.ts
+// Phase 6 adds a STANDALONE EconomySim scenario driving applyCivic (levies,
+// public hiring, spend orders, fares) — civic conservation + determinism.
 import { Town } from '../src/world/town';
 import { getEmbedder, cosine } from '../src/llm/embed';
+import { EconomySim } from '../src/econ/econsim';
+import type { EconSnapshot } from '../src/econ/types';
+import { mulberry32 } from '../src/core/util/num';
 
 const town = new Town({ llm: null, seed: 7, startHour: 7, speed: 0.05 });
 const DT_SIM = 0.05;
@@ -23,6 +28,9 @@ let maxConsumerDebt = 0, maxDepInt = 0, maxInventory = 0;
 let makerRevTick = 0, makerCumRev = 0, durablesSold = 0;
 let maxPending = 0, wsBandOk = true;
 let uLateSum = 0, uLateN = 0;
+// phase 6 tracking (mobility: dealership · taxi · ownership · fares)
+let dealerCumRev = 0, taxiHeadMax = 0, vehOwnersMax = 0, carOwnersMax = 0;
+let fareSpendMax = 0, transitClearedMax = 0;
 
 for (let i = 0; i < STEPS; i++) {
   town.update(dtReal);
@@ -50,7 +58,15 @@ for (let i = 0; i < STEPS; i++) {
     if (mk.sector === 'homegoods' || mk.sector === 'apparel') {
       durablesSold = Math.max(durablesSold, Math.min(mk.demand, mk.supply));
     }
+    if (mk.sector === 'transit') transitClearedMax = Math.max(transitClearedMax, Math.min(mk.demand, mk.supply));
   }
+  const dealer = e.businesses.find((b) => b.id === 'biz-dealership');
+  if (dealer) dealerCumRev = Math.max(dealerCumRev, dealer.cumRevenue);
+  const taxi = e.businesses.find((b) => b.id === 'biz-taxi');
+  if (taxi) taxiHeadMax = Math.max(taxiHeadMax, taxi.headcount);
+  vehOwnersMax = Math.max(vehOwnersMax, e.shadow.carOwners + e.shadow.bikeOwners);
+  carOwnersMax = Math.max(carOwnersMax, e.shadow.carOwners);
+  fareSpendMax = Math.max(fareSpendMax, e.shadow.fareSpend);
   if (e.premises) maxPending = Math.max(maxPending, e.premises.pending);
   for (const w of e.wholesale ?? []) {
     // wholesale must sit between the world's raw-input floor and the retail sticker
@@ -176,6 +192,15 @@ pass = ok('unemployment settled in [4%, 16%] (post-day-30 mean)', uLate >= 0.04 
 pass = ok('the grocery retailer stayed solvent 70 days', !!grocer && !grocer.bankrupt) && pass;
 pass = ok('at least one maker stayed solvent 70 days', makersAlive.length >= 1) && pass;
 
+// --- phase 6a: mobility (dealership · taxi · ownership · fares) ---
+console.log(`  (mobility: dealer cumRev $${dealerCumRev.toFixed(0)} · taxi head max ${taxiHeadMax}` +
+  ` · owners max ${vehOwnersMax} (${carOwnersMax} cars) · fare spend max $${fareSpendMax.toFixed(1)}/tick` +
+  ` · transit cleared max ${transitClearedMax.toFixed(1)}/tick)`);
+pass = ok('a household bought a vehicle (durable-wear mechanism)', vehOwnersMax > 0) && pass;
+pass = ok('the dealership sold vehicles off its shelf', dealerCumRev > 0) && pass;
+pass = ok('the taxi firm hired a driver', taxiHeadMax >= 1) && pass;
+pass = ok('employed households paid commute fares (transit cleared)', fareSpendMax > 0 && transitClearedMax > 0) && pass;
+
 // --- the Observatory's history (t0 → now, bounded, monotonic) ---
 const h = e.history!;
 const t = h.data[h.fields.indexOf('t')];
@@ -186,6 +211,124 @@ pass = ok('history recorded from t0 to now', h.n > 100 && t[0] < 48 && t[h.n - 1
 pass = ok('history time axis monotonic', monotonic) && pass;
 pass = ok('history stayed within its memory cap', h.n <= 1441 && h.fields.length === h.data.length) && pass;
 pass = ok('notable events were logged', h.events.length > 0) && pass;
+
+// =============================================================================
+// phase 6b: CIVIC EXECUTION — a standalone EconomySim drives applyCivic
+// (levies · public hiring · spend orders · fares) so the conservation ledger
+// and determinism are audited without the town in the loop.
+// =============================================================================
+const totalMoney = (s: EconSnapshot): number => {
+  let m = s.civic!.treasury;
+  for (const a of s.agents) m += a.money;
+  for (const b of s.businesses) m += b.cash;
+  for (const c of s.builders ?? []) m += c.cash;
+  m += s.shadow.meanMoney * s.shadow.n;
+  return m;
+};
+
+interface CivicRun {
+  sim: EconomySim;
+  json: string;
+  taxCollected: number; borrowed: number; founded?: string; commissioned?: string;
+  reliefOk: boolean; fareOk: boolean; adminFare: number;
+  maxConsErr: number; maraMoney: number;
+}
+function runCivicScenario(seed: number): CivicRun {
+  const sim = new EconomySim([
+    { id: 'cashier-mara', name: 'Mara', isMara: true },
+    { id: 'a1', name: 'Avery' }, { id: 'a2', name: 'Blair' }, { id: 'a3', name: 'Cody' },
+  ], { seed, clock: 0 });
+  const rng = mulberry32((seed ^ 0xc171c) >>> 0);
+  let clock = 0;
+  let maxConsErr = 0;
+  const run = (hours: number) => {
+    for (let i = 0; i < hours; i++) {
+      clock += 1;
+      sim.step({
+        clock, dtHours: 1, weekday: ((clock / 24) | 0) % 7 < 5, rng,
+        agents: [
+          { id: 'a1', name: 'Avery', atWork: false, workHours: 0, hunger: 0.4, thirst: 0.4, seekingWork: true, conscientious: 0.2 },
+          { id: 'a2', name: 'Blair', atWork: false, workHours: 0, hunger: 0.3, thirst: 0.5, seekingWork: true, conscientious: 0 },
+          { id: 'a3', name: 'Cody', atWork: false, workHours: 0, hunger: 0.5, thirst: 0.3, seekingWork: false, conscientious: -0.2 },
+        ],
+      });
+      if (clock % 8 === 0) {
+        const mv = sim.snapshot().monetary!;
+        maxConsErr = Math.max(maxConsErr, Math.abs(mv.conservationError));
+      }
+    }
+  };
+
+  run(300);
+  sim.applyCivic({ levies: { payrollRate: 0.04, salesRate: 0.03 } }, clock);
+  run(20);
+  // deficit finance: the treasury is still thin — a civic hall must borrow.
+  const rcBuild = sim.applyCivic({ spendOrders: [{ kind: 'civic-build', amount: 5200 }] }, clock);
+  run(100);
+  sim.applyCivic({ hires: [{ employerId: 'gov', name: 'Town Hall', wage: 15, desired: 2 }] }, clock);
+  run(60);
+  const rcTax = sim.applyCivic({}, clock);   // drain the accrued levies into a receipt
+  run(80);
+  // relief: a pure treasury → households transfer (borrowing accounted).
+  let s0 = sim.snapshot(); let m0 = totalMoney(s0);
+  const rcRelief = sim.applyCivic({ spendOrders: [{ kind: 'relief', amount: 400 }] }, clock);
+  let s1 = sim.snapshot(); let m1 = totalMoney(s1);
+  const reliefOk = Math.abs(m1 - m0 - rcRelief.borrowed) < 1e-6
+    && rcRelief.spent.some((x) => x.kind === 'relief' && x.amount > 0);
+  run(20);
+  // fares: riders → operator, conserved exactly.
+  s0 = sim.snapshot(); m0 = totalMoney(s0);
+  const taxiCash0 = s0.businesses.find((b) => b.id === 'biz-taxi')?.cash ?? NaN;
+  const rcFare = sim.applyCivic({ fareRevenue: [{ operatorId: 'biz-taxi', amount: 60 }] }, clock);
+  s1 = sim.snapshot(); m1 = totalMoney(s1);
+  const taxiCash1 = s1.businesses.find((b) => b.id === 'biz-taxi')?.cash ?? NaN;
+  const fareOk = Math.abs(m1 - m0) < 1e-6 && rcFare.fareCredited > 0
+    && Math.abs(taxiCash1 - taxiCash0 - rcFare.fareCredited) < 1e-6;
+  run(20);
+  // public founding: a transit-subsidy order charters the authority from
+  // treasury funds (bypassing the entrepreneur wealth gate).
+  const rcFound = sim.applyCivic({ spendOrders: [{ kind: 'transit-subsidy', amount: 2500 }] }, clock);
+  run(360);
+  const end = sim.snapshot();
+  const adminFare = end.markets.find((mk) => mk.sector === 'transit')?.price ?? 0;
+  return {
+    sim, json: JSON.stringify(sim.toJSON()),
+    taxCollected: rcTax.taxCollected, borrowed: rcBuild.borrowed,
+    founded: rcFound.founded, commissioned: rcBuild.commissioned,
+    reliefOk, fareOk, adminFare, maxConsErr,
+    maraMoney: end.agents.find((a) => a.id === 'cashier-mara')?.money ?? NaN,
+  };
+}
+
+const runA = runCivicScenario(11);
+const runB = runCivicScenario(11);
+const endA = runA.sim.snapshot();
+const cv = endA.civic!;
+const ledgerErr = Math.abs(cv.treasury -
+  (cv.taxCum - cv.payrollCum - cv.spendCum - cv.interestCum + cv.borrowCum - cv.repaidCum));
+const civicBuilt = (endA.builders ?? []).some((b) => b.buildings.some((bl) => bl.kind === 'civic' && bl.complete));
+
+console.log('\n=== civic scenario (standalone applyCivic, 960 sim-h) ===');
+console.log(`  treasury $${cv.treasury.toFixed(0)} · taxes $${cv.taxCum.toFixed(0)} · payroll $${cv.payrollCum.toFixed(0)}` +
+  ` · spend $${cv.spendCum.toFixed(0)} · borrowed $${cv.borrowCum.toFixed(0)} · repaid $${cv.repaidCum.toFixed(0)}` +
+  ` · interest $${cv.interestCum.toFixed(0)} · ledgerErr $${ledgerErr.toExponential(1)}`);
+console.log(`  staff ${cv.staff} · levy ${(cv.levyPayroll * 100).toFixed(0)}%/${(cv.levySales * 100).toFixed(0)}%` +
+  ` · founded ${runA.founded ?? '—'} · fare $${runA.adminFare.toFixed(2)} · civic hall ${civicBuilt ? 'built' : 'pending'}` +
+  ` · consErr max $${runA.maxConsErr.toFixed(4)}`);
+pass = ok('applyCivic: levies collected to the treasury', runA.taxCollected > 0 && cv.taxCum > 0) && pass;
+pass = ok('treasury ledger conserves to 1e-6 (Δtreasury ≡ taxes − outlays + borrowing)', ledgerErr < 1e-6) && pass;
+pass = ok('civic relief conserved private money (treasury → households)', runA.reliefOk) && pass;
+pass = ok('fare revenue conserved (riders → operator)', runA.fareOk) && pass;
+pass = ok('gov hired staff through the labour market', cv.staff >= 1 && cv.payrollCum > 0) && pass;
+pass = ok('treasury deficit-financed via the Financier (real money creation)', runA.borrowed > 0) && pass;
+pass = ok('transit authority founded publicly via spend order', runA.founded === 'biz-transit-auth'
+  && endA.businesses.some((b) => b.id === 'biz-transit-auth' && b.sector === 'transit')) && pass;
+pass = ok('administered fare rules the transit market (tâtonnement bypassed)', Math.abs(runA.adminFare - 2.4) < 1e-9) && pass;
+pass = ok('a civic build flowed through Construction', !!runA.commissioned && civicBuilt) && pass;
+pass = ok('money conserved under civic flows (bank identity ~0)',
+  runA.maxConsErr < (endA.monetary?.broadMoney ?? 1) * 1e-3) && pass;
+pass = ok('byte-identical toJSON across same-seed civic runs', runA.json === runB.json) && pass;
+pass = ok('Mara exempt from levies (legacy-ledger wallet untouched)', runA.maraMoney === 60) && pass;
 
 console.log(`\n${pass ? 'ALL PASS' : 'SOME FAILED'}`);
 process.exit(pass ? 0 : 1);

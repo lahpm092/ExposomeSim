@@ -65,6 +65,16 @@ export const HIST_FIELDS = [
   'commercialUnits',   // total premises units minted
   'makerCount',
   'retailCount',
+  // ---- phase 6: mobility + civic (append-only; old saves zero-fill) ----
+  'priceTransit', 'priceVehicles',
+  'shortTransit', 'shortVehicles',
+  'carOwners',         // households owning a car
+  'bikeOwners',
+  'commuteDemand',     // fare-demand units per tick
+  'fareSpend',         // fares debited per tick (shadow)
+  'taxTake',           // levies collected per tick
+  'treasury',          // gov treasury balance
+  'govStaff',          // Σ public-roster headcount
 ] as const;
 
 export type HistField = (typeof HIST_FIELDS)[number];
@@ -75,6 +85,7 @@ const EVENT_CAP = 240;     // notable events kept
 /** eviction/expansion drama ranks below births/deaths/defaults/policy moves. */
 const EVENT_PRIORITY: Record<EconEventKind, number> = {
   found: 3, bankrupt: 3, default: 2, policy: 2, boom: 2, bust: 2, evict: 1,
+  tax: 2, 'founded-public': 3,
 };
 
 export class EconHistory {

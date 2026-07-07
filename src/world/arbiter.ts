@@ -35,6 +35,10 @@ export interface ArbiterContext {
   current?: Intention;                                      // incumbent (hysteresis)
   habit: (place: PlaceId, kind: IntentionKind) => number;   // learned ritual strength
   rng: () => number;                                        // deterministic jitter
+  /** an assembly is called at a borrowed venue: a DYNAMIC affordance (PLACES is
+   *  never polluted) + a civicPull urgency from the agent's own civic salience.
+   *  Maslow prepotency still gates it for free — the desperate skip civic life. */
+  civic?: { place: PlaceId; pull: number } | null;
 }
 
 // ---- tuning ---------------------------------------------------------------
@@ -61,6 +65,13 @@ const JITTER          = 0.01; // tie-breaking exploration noise
 const GO_HOME: Affordance = {
   kind: 'go_home', tier: 'safety', satisfies: 0.4,
   costMoney: 0, costEnergy: -0.05, durHours: 1,
+};
+
+// The borrowed-venue assembly: offered ONLY while ctx.civic is set (an assembly
+// window is open at the park or food court) — there is no city hall to author.
+const ASSEMBLY: Affordance = {
+  kind: 'attend_assembly', tier: 'belonging', satisfies: 0.55,
+  costMoney: 0, costEnergy: 0.08, durHours: 3, social: true,
 };
 
 // ---------------------------------------------------------------------------
@@ -95,6 +106,7 @@ function primaryNeed(kind: IntentionKind, n: NeedsReadout): number {
     case 'work':      return Math.max(n.esteem, 0.3);          // always some wage drive
     case 'shop':      return Math.max(n.hunger, 0.2);          // instrumental → eating
     case 'go_home':   return Math.max(n.safety, 0.3 * n.energy);
+    case 'attend_assembly': return Math.max(0.5 * n.belonging, 0.4 * n.esteem);
     default:          return 0.3;
   }
 }
@@ -123,6 +135,7 @@ function circadianFit(kind: IntentionKind, clock: number): number {
     case 'bathe':     f = bump(h, 7, 1.6); break;                      // morning ritual
     case 'buy_meal':  f = bump(h, 12.5, 1.5); break;                   // the lunch break
     case 'eat':       f = Math.max(bump(h, 8, 1.2), bump(h, 12.5, 1.5), bump(h, 19, 1.8)); break;
+    case 'attend_assembly': f = bump(h, 19, 2.5); break;               // assemblies convene at dusk
     default:          f = 0.3;
   }
   return CIRC_AMP * (f - 0.35);
@@ -198,6 +211,7 @@ function score(aff: Affordance, place: Place, ctx: ArbiterContext, w: Record<Nee
   if (aff.kind === 'work') u += workUrgency(ctx);               // rent / poverty
   if (aff.kind === 'rest') u += restPull(ctx);                  // night + sleep debt
   if (aff.kind === 'shop') u += groceryPull(ctx);              // empty fridge → restock
+  if (aff.kind === 'attend_assembly') u += ctx.civic?.pull ?? 0; // civic salience, not duty
   u += nightGate(aff.kind, ctx.clock);                         // sleep through the night
   u += (ctx.rng() - 0.5) * 2 * JITTER;                          // break exact ties
   return u;
@@ -230,6 +244,7 @@ function reasonFor(kind: IntentionKind, place: PlaceId, ctx: ArbiterContext): st
     case 'socialize': return `lonely (belonging ${pct(n.belonging)}) -> socialize ${at}`;
     case 'linger':    return `seeking novelty (${pct(n.novelty)}) -> linger ${at}`;
     case 'go_home':   return `withdraw home (safety ${pct(n.safety)})`;
+    case 'attend_assembly': return `the town is assembling -> ${at}`;
     default:          return `${kind} ${at}`;
   }
 }
@@ -258,6 +273,12 @@ export function chooseIntention(ctx: ArbiterContext): Intention {
       if (!feasible(aff, ctx)) continue;
       offer(aff.kind, place.id, score(aff, place, ctx, w));
     }
+  }
+
+  // 1b. The dynamic assembly affordance — materialized at the borrowed venue
+  //     ONLY while an assembly is called (PLACES stays unpolluted).
+  if (ctx.civic && openNow(PLACES[ctx.civic.place], ctx.clock)) {
+    offer(ASSEMBLY.kind, ctx.civic.place, score(ASSEMBLY, PLACES[ctx.civic.place], ctx, w));
   }
 
   // 2. The guaranteed fallback: withdraw home. Costs nothing, needs nothing —

@@ -19,11 +19,14 @@ import { PALETTE, clampNum } from './palette';
 import { Humanoid } from './humanoid';
 import type { ActivityKind } from './poses';
 import {
-  CITY, INT_SCALE, mapToWorld, makeCityMats, buildLocale, fillerBlock, lamp, parkedCar,
+  CITY, INT_SCALE, mapToWorld, makeCityMats, buildLocale, fillerBlock, parkedCar,
   type CityMats, type Locale,
 } from './worldgeo';
 import { AgentBodies } from './agentbodies';
 import { StreetLife } from './streetlife';
+import { buildStreetNet, type StreetNet } from './streetnet';
+import { TransitLife, rideModeOf } from './transitlife';
+import { CivicAssembly } from './assembly';
 import { buildFoodBuilding, type FoodBuilding } from './foodcourt';
 import { buildOfficeBuilding, type OfficeBuilding } from './office';
 import { buildSupermarket } from './supermarket';
@@ -43,10 +46,6 @@ const SUPERMARKET_POS = new V(0, 0, -78);
 // the financial district: the Federal Reserve + a commercial bank, north of core.
 const FED_POS = new V(0, 0, 112);
 const BANK_POS = new V(-50, 0, 110);
-const STREETS: [PlaceId, PlaceId][] = [
-  ['home', 'work'], ['home', 'market'], ['work', 'market'],
-  ['market', 'thirdplace'], ['work', 'thirdplace'], ['home', 'park'], ['market', 'park'],
-];
 const R_FILLER = 30;
 
 const hash01 = (n: number) => { const s = Math.sin(n * 127.1) * 43758.5453; return s - Math.floor(s); };
@@ -83,6 +82,14 @@ export class CityStage {
   };
   // the financial-district crowd (only rendered when the camera is near the buildings).
   private bankCrowd!: BankCrowd;
+  // the ONE street graph, drawn — kerbs, lamps, crossings and signal masts.
+  private streetNet!: StreetNet;
+  // transport embodied: buses/taxis, stop queues, hot-crossing walkers.
+  private transitLife!: TransitLife;
+  // the polis embodied: dais + gathering at a live assembly's venue.
+  private civicAssembly!: CivicAssembly;
+  // reused per-frame handle for the protagonist's ride (zero allocation).
+  private readonly protRide = { id: ROSTER[0].profile.id, x: 0, z: 0 };
 
   private readonly mara: Humanoid;
   private readonly residentHumans: Humanoid[] = [];  // the 9 other agents
@@ -127,7 +134,11 @@ export class CityStage {
 
     this.mats = makeCityMats();
     this.buildGround();
-    this.buildStreets();
+    // streets come from the ONE graph the transport sim routes over (a pure
+    // function of the same anchors), so kerbs/signals land where the sim's
+    // stops, congestion and pedestrian lights actually live.
+    this.streetNet = buildStreetNet(this.mats);
+    this.scene.add(this.streetNet.group);
     this.buildLocales();
     this.buildFiller();
 
@@ -206,6 +217,11 @@ export class CityStage {
       officePos: new V(26, 0, 4), officeR: 8,
     });
 
+    // transport + polis embodied — both read the snapshot only, mount when
+    // hot/near, and dispose when cold (the bankCrowd/buildsite discipline).
+    this.transitLife = new TransitLife(this.scene, this.mats, this.streetNet);
+    this.civicAssembly = new CivicAssembly(this.scene, this.mats);
+
     const start = home.group.localToWorld(new V(0, 0, 3.0));
     this.mara.place(start, home.yaw);
     this.maraWorld.copy(start);
@@ -239,26 +255,6 @@ export class CityStage {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(grid, 3));
     this.scene.add(new THREE.LineSegments(g, this.mats.faint));
-  }
-
-  private buildStreets(): void {
-    for (const [a, b] of STREETS) {
-      const pa = mapToWorld(PLACES[a].pos2D), pb = mapToWorld(PLACES[b].pos2D);
-      const dir = new V().subVectors(pb, pa);
-      const len = dir.length(); dir.normalize();
-      const nrm = new V(-dir.z, 0, dir.x).multiplyScalar(1.6);
-      this.scene.add(seg([
-        pa.x + nrm.x, 0.01, pa.z + nrm.z, pb.x + nrm.x, 0.01, pb.z + nrm.z,
-        pa.x - nrm.x, 0.01, pa.z - nrm.z, pb.x - nrm.x, 0.01, pb.z - nrm.z,
-      ], this.mats.soft));
-      const lampN = Math.max(1, Math.floor(len / 9));
-      for (let i = 1; i <= lampN; i++) {
-        const t = i / (lampN + 1);
-        const L = lamp(this.mats);
-        L.position.set(pa.x + dir.x * len * t + nrm.x, 0, pa.z + dir.z * len * t + nrm.z);
-        this.scene.add(L);
-      }
-    }
   }
 
   private buildLocales(): void {
@@ -296,6 +292,7 @@ export class CityStage {
         if (BUILD_LOTS.some((l) => Math.hypot(l.x - jx, l.z - jz) < 18)) continue; // leave lots free
         if (SUPERMARKET_POS.distanceTo(p) < 16) continue;
         if (FED_POS.distanceTo(p) < 22 || BANK_POS.distanceTo(p) < 15) continue; // civic plaza
+        if (this.streetNet.distToStreet(jx, jz) < 9) continue;   // carve the street corridors
         // a dense low-rise field with taller towers scattered through it (a skyline).
         const tall = hash01(s + 23) > 0.78 ? 18 + hash01(s + 29) * 22 : 0;
         const blk = fillerBlock(this.mats, 5 + hash01(s + 11) * 7, 5 + hash01(s + 17) * 10 + tall, 5 + hash01(s + 13) * 7, h > 0.5);
@@ -372,6 +369,11 @@ export class CityStage {
   /** which agent the inspector panels should track (last-followed agent). */
   get focusIndex(): number { return this.focus; }
 
+  /** the camera's world XZ — the sim-side observer center (town.setObserver). */
+  get observerXZ(): { x: number; z: number } {
+    return { x: this.camera.position.x, z: this.camera.position.z };
+  }
+
   /** dev-only: park the free camera at a fixed world vantage (pos + yaw/pitch) so
    *  headless captures can inspect a space head-on without follow-zoom normalising
    *  scale. yaw 0 looks toward +z; pitch <0 looks down. */
@@ -397,6 +399,14 @@ export class CityStage {
    *  headless captures can photograph a mounted interior without steering an
    *  agent into the causal radius. Render-side only — the sim is untouched. */
   debugHotVenues(on: boolean): void { this.worldCtx.forceHot = on; }
+
+  /** dev-only: force every transit body (buses, trip vehicles, stop queues,
+   *  crossing walkers) and any live assembly gathering to mount regardless of
+   *  camera distance/hot set — the debugHotVenues mirror for capture scripts. */
+  debugHotTransit(on: boolean): void {
+    this.transitLife.forceHot = on;
+    this.civicAssembly.forceHot = on;
+  }
 
   update(snap: TownSnapshot, dtReal: number): void {
     const dt = Number.isFinite(dtReal) ? clampNum(dtReal, 0, 0.1) : 0;
@@ -435,6 +445,13 @@ export class CityStage {
       // the bank/Fed crowd: cheap bodies, spawned only when the camera is near.
       this.bankCrowd.update(this.camera.position, dt);
       this.streetLife.update(dt);   // ambient wandering extras (own their own tick)
+      // the streets live: signal phases are a pure function of the sim clock;
+      // buses/taxis/queues/crossers mount from the snapshot only when hot/near.
+      this.streetNet.updatePhases(snap.time);
+      this.protRide.x = this.mara.pos.x; this.protRide.z = this.mara.pos.z;
+      this.transitLife.update(snap.transport, snap.time, this.camera.position, dt,
+        snap.travelling ? this.protRide : null);
+      this.civicAssembly.update(snap.gov, snap.time, this.camera.position, dt);
       this.updateLOD(snap);
     } catch { /* never break the loop */ }
 
@@ -448,7 +465,10 @@ export class CityStage {
   /** Mara out in the city: travel door-to-door, else stand at the locale act spot. */
   private updateProtagonistCity(snap: TownSnapshot): void {
     this.mara.setScale(1);
-    this.mara.setActivity('walk');
+    // riding a vehicle (transit view carries her live trip's mode) → seated,
+    // tucked inside the taxi/bus body transitLife glides along with her.
+    const ride = snap.travelling ? rideModeOf(snap.transport, this.protRide.id) : null;
+    this.mara.setActivity(ride && ride !== 'walk' && ride !== 'bike' ? 'sit_rest' : 'walk');
     if (snap.travelling) {
       const from = this.locales.get(snap.place), dest = this.locales.get(snap.intention.place);
       if (from && dest) {
@@ -679,12 +699,8 @@ export class CityStage {
     this.bubble.remove();
     this.camPanel?.remove();
     this.streetLife?.dispose();
+    this.transitLife?.dispose();
+    this.civicAssembly?.dispose();
     this.renderer.dispose();
   }
-}
-
-function seg(pts: number[], mat: THREE.LineBasicMaterial): THREE.LineSegments {
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-  return new THREE.LineSegments(g, mat);
 }

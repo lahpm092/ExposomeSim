@@ -160,6 +160,7 @@ body::before {
    widgets (cam roster z-8, psyche z-7, skyclock z-7, speech bubble z-8) —
    unlike the memory graph, its strips fill every corner with content. */
 .econviz { position: absolute; inset: 0; z-index: 9; display: none; }
+.polisviz { position: absolute; inset: 0; z-index: 9; display: none; }
 .psycheviz {
   position: absolute; right: calc(var(--u) * 2); bottom: calc(var(--u) * 2); z-index: 7;
   display: block;

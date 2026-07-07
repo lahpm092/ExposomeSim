@@ -21,20 +21,26 @@ import { MindLite, type MindLiteJSON } from '../mind/mindlite';
 import { computeCoreAffect } from '../mind/soma';
 import { CASHIER_PROFILE, sampleProfile } from '../mind/params';
 import { computeNeeds, applyNeedFeedback, emptyNeedIntegrals, updateNeedIntegrals } from '../mind/needs';
-import { PLACES, openNow, travelTime } from './places';
+import { PLACES, PLACE_LIST, openNow, installTravelCost } from './places';
 import {
   createResources, tickWork, canBuyGroceries, buyGroceries, buyMeal, canEat, consumeMeal,
   dueRent, payRent, FOOD_VOCAB,
 } from '../econ/economy';
 import { EconomySim, type EconJSON } from '../econ/econsim';
+import { AUTHORITY_ID, BUILD_LOTS } from '../econ/config';
+import type { CivicEconCommands, EconSnapshot } from '../econ/types';
 import { CausalField } from '../causal';
+import { GovField, type CivicPostKind, type GovTickInput, type GovTickResult } from '../gov/index';
+import {
+  TransportField, type ModeId, type NetAnchor, type TransportTickInput, type TripHandle,
+} from '../transport/index';
 import { chooseIntention } from './arbiter';
 import { newRelationship, updateBond, distillSummary, decayBonds } from './relationship';
 import { createDensity, stepDensity, expectedAt } from './city';
 import { makeNpcLite, stepNpcLite, npcName, type LiteCtx } from './npc';
 import { buildMessages, parseResponse, fallbackResponse, LLM_RESPONSE_SCHEMA } from '../llm/prompt';
 import { makeCustomer, buildAgenda, IDLE_EVENT } from './events';
-import { Society, type MaraMacro } from './society';
+import { Society, type MaraMacro, type CivicEnv } from './society';
 import { ROSTER } from '../mind/roster';
 import type { AgentPublic, AgentPlace, WorkMode, PhoneState, WorkPsych } from '../core/types';
 import { createPhoneState, stepPhone, type PhoneCtx } from '../mind/phone';
@@ -55,6 +61,36 @@ const WANDER: Record<string, Vec3> = {
 };
 // a handful of recurring "locals" at the third place, so re-encounters can bond
 const SOCIAL_SEEDS = [10117, 20431, 30289, 40763];
+
+// ---- world-metre frame ------------------------------------------------------
+// 0..1 town coords → metres uses the same (p−0.5)·66 the render's mapToWorld
+// applies (render/worldgeo.ts CITY). One scale for streets, gates and gov.
+const M = 66;
+const toM = (p: Vec2): { x: number; z: number } => ({ x: (p.x - 0.5) * M, z: (p.y - 0.5) * M });
+const toTown = (p: { x: number; z: number }): Vec2 => ({ x: p.x / M + 0.5, y: p.z / M + 0.5 });
+const placeM = (id: PlaceId): { x: number; z: number } => toM(PLACES[id].pos2D);
+// the citystage office group (the roster's second workplace, off the place graph)
+const OFFICE_M = { x: 26, z: 4 };
+
+/** the street anchors: the five PLACES + the off-core POIs + the build lots —
+ *  the graph (and thus every route, stop and signal) is a pure function of these. */
+function netAnchors(): NetAnchor[] {
+  const out: NetAnchor[] = PLACE_LIST.map((p) => ({ id: p.id, ...toM(p.pos2D), kind: 'place' }));
+  out.push(
+    { id: 'supermarket', x: 0, z: -78, kind: 'poi' },
+    { id: 'fed', x: 0, z: 112, kind: 'poi' },
+    { id: 'bank', x: -50, z: 110, kind: 'poi' },
+    { id: 'office', x: OFFICE_M.x, z: OFFICE_M.z, kind: 'poi' },
+  );
+  for (const l of BUILD_LOTS) out.push({ id: l.id, x: l.x, z: l.z, kind: 'lot' });
+  return out;
+}
+
+// assemblies borrow real venues — the park or the food court; no city hall exists.
+const CIVIC_VENUES = (): { id: string; x: number; z: number }[] => [
+  { id: 'park', ...placeM('park') },
+  { id: 'foodcourt', ...placeM('work') },
+];
 
 let _eid = 0;
 const ev = (kind: string, description: string, s: number, v: number, source?: string): WorldEvent =>
@@ -78,8 +114,27 @@ export class Town {
    *  are simulated as DISCRETE events (and teach the surrogate); the cold world
    *  drifts on the learned average causality. Resolution, never conservation. */
   readonly causal = new CausalField();
+  /** the emergent-government field: opinion, movements, ballots, treasury. It
+   *  only ever COMMANDS — the world writes memories/posts, econ moves money. */
+  readonly gov: GovField;
+  /** streets, congestion, mode choice, fleets — the price of distance. */
+  readonly transport: TransportField;
   private lastCausalSeq = -1;
   private lastCausalClock = 0;
+  /** between-tick caches the arbiter/society read (rebuilt each gov tick + on load). */
+  private civicCache: {
+    assembly: { place: string; startH: number; endH: number } | null;
+    topics: string[];
+    salience: Map<string, { salience: number; support: number }>;
+    subsidy: number;
+  } = { assembly: null, topics: [], salience: new Map(), subsidy: 0 };
+  /** econ's cumulative treasury ledger at the last gov tick (delta = real flows). */
+  private lastCivic = { tax: 0, borrow: 0, payroll: 0, spend: 0, interest: 0, repaid: 0 };
+  /** Mara's live street journey (posOf drives macroPos along the polyline). */
+  private maraTrip: TripHandle | null = null;
+  /** the camera as a sim-side observer (fed per frame from main.ts). */
+  private observer: { x: number; z: number; mapOpen: boolean } | null = null;
+  private chById = new Map<string, Character>();
   /** which of the ten agents the inspector panels track (0 = Mara). */
   focusIndex = 0;
   llm: LLMClient | null;
@@ -151,16 +206,31 @@ export class Town {
       phase: 'execute', startedAt: this.clock, plannedEnd: this.clock + 0.6,
     };
     this.enterLocale('home');
+    // the polis + the streets come first: Society consumes gov.seedPlan() (the
+    // civic spark AS memory) and the travel seam needs the graph from t0.
+    this.gov = new GovField({ seed: opts.seed ?? 7 });
+    this.transport = new TransportField(netAnchors(), { seed: opts.seed ?? 7 });
     // the other nine minds: each a full Character with its own soma + memory graph,
     // seeded with its interests, living its role-driven day and free to strike up
     // emergent conversations. Mara ([0]) is stepped here; the Society steps 1..9.
-    this.society = new Society(this.mara, { seed: opts.seed ?? 7, startHour: opts.startHour ?? 7.5 });
+    this.society = new Society(this.mara, {
+      seed: opts.seed ?? 7, startHour: opts.startHour ?? 7.5,
+      civicSeeds: this.gov.seedPlan(),
+    });
     // the market economy over ALL full-res agents (Mara [0] is mirrored from her
     // legacy ledger; the other 17 are driven fully) + the probabilistic shadow pop.
     this.economy = new EconomySim(
       ROSTER.map((e, i) => ({ id: e.profile.id, name: e.profile.name, isMara: i === 0 })),
       { seed: opts.seed ?? 7, clock: this.clock },
     );
+    ROSTER.forEach((e, i) => this.chById.set(e.profile.id, this.society.characters[i]));
+    // the travel seam: the arbiter's K_TRAVEL now reads the street network's
+    // generalized cost (fare folded in at the default VoT) — one function,
+    // decision and journey priced coherently.
+    installTravelCost((a, b) => {
+      const e = this.transport.costEstimate(placeM(a), placeM(b), this.clock);
+      return clamp(e.durH + e.money / 12, 0.02, 1.5);
+    });
   }
 
   get clock(): number { return this.mara.soma.t; }
@@ -222,9 +292,14 @@ export class Town {
 
     // 6) the other nine minds: step their somas, run their role behaviour, and
     //    let conversations emerge between them. Mara's macro state is projected in
-    //    so she reads uniformly alongside them for the renderer + inspector.
+    //    so she reads uniformly alongside them for the renderer + inspector. The
+    //    civic channel + the transport-priced commute ride in through the env.
     this.society.setMaraMacro(this.maraMacro());
-    this.society.step(dt, { clock: this.clock, weekday: !this.weekend, rng: this.rng });
+    this.society.step(dt, {
+      clock: this.clock, weekday: !this.weekend, rng: this.rng,
+      commuteH: (from, to) => this.commuteDur(from, to),
+      civic: this.civicEnv(),
+    });
     // being heard online eases the loneliness reservoir (belonging → a felt purpose).
     this.socialFuel = clamp(this.socialFuel + this.society.takeMaraBelonging() * 0.6, 0, 1);
 
@@ -233,35 +308,230 @@ export class Town {
     this.economy.mirrorMara(this.resources.money, this.resources.foodStock);
     this.economy.step({ clock: this.clock, dtHours: dt, weekday: !this.weekend, rng: this.rng, agents: this.society.econInputs() });
 
-    // 8) the causal layer rides the econ tick: each fresh tick, the premises
-    //    venues' EXACT flow slices are handed to the field, which discretizes
-    //    the hot ones (near a main character) into watched arrivals and lets
-    //    the cold ones drift on the learned surrogate.
+    // 8) the causal layer, the streets and the polis all ride the econ tick:
+    //    the venues' EXACT flow slices are discretized where watched; transport
+    //    relaxes congestion + moves fleets; gov reads the material world and
+    //    hands back COMMANDS the world + econ execute. dtH is sim-hours.
     if (this.economy.tickSeq !== this.lastCausalSeq) {
       const dtH = Math.max(this.clock - this.lastCausalClock, 1e-6);
       this.lastCausalSeq = this.economy.tickSeq;
       this.lastCausalClock = this.clock;
-      this.causal.tick(this.causalCenters(), this.economy.venuePoints(), this.economy.venueFlows(), this.clock, dtH);
+      const centers = this.causalCenters();
+      this.causal.tick(centers, this.economy.venuePoints(), this.economy.venueFlows(), this.clock, dtH);
+      this.stepPolis(centers, dtH);
+    }
+
+    // 9) microscopic street step (social-force pedestrians, signal beats) —
+    //    per frame, but ONLY while some stop/intersection is hot (the contract:
+    //    a cold, unobserved run never pays this).
+    if (this.transport.gate.hotList().length) {
+      const eye = this.observer ?? { x: (this.macroPos.x - 0.5) * M, z: (this.macroPos.y - 0.5) * M, mapOpen: false };
+      this.transport.hotStep(dt, { x: eye.x, z: eye.z, clock: this.clock, mapOpen: this.observer?.mapOpen });
     }
   }
 
-  /** world-metre positions of the main characters: Mara's continuous macro
-   *  position plus one center per PLACE currently occupied by a Tier-A agent.
-   *  (0..1 town coords → metres uses the same (p−0.5)·66 the render's
-   *  mapToWorld applies — see render/worldgeo.ts CITY.) */
-  private causalCenters(): { id: string; x: number; z: number }[] {
-    const M = 66;
-    const w = (p: { x: number; y: number }) => ({ x: (p.x - 0.5) * M, z: (p.y - 0.5) * M });
-    const centers: { id: string; x: number; z: number }[] = [{ id: 'mara', ...w(this.macroPos) }];
-    const seen = new Set<string>();
-    for (const place of this.society.occupiedPlaces()) {
-      if (seen.has(place)) continue;
-      seen.add(place);
-      if (place === 'home') centers.push({ id: 'pl-home', ...w(PLACES.home.pos2D) });
-      else if (place === 'foodcourt') centers.push({ id: 'pl-foodcourt', ...w(PLACES.work.pos2D) });
-      else if (place === 'office') centers.push({ id: 'pl-office', x: 26, z: 4 }); // citystage officeGroup
+  // ===================== the polis tick (econ cadence) ===================
+  /** transport → gov → econ, in causal order: the streets price the commute,
+   *  the polis reads the material world and commands, econ moves every dollar. */
+  private stepPolis(centers: { id: string; x: number; z: number }[], dtH: number): void {
+    const es = this.economy.snapshot();
+    const tres = this.transport.tick(this.transportInput(es, centers), this.clock, dtH);
+    const gres = this.gov.tick(this.govInput(es, centers, tres.commuteCostIndex), this.clock, dtH);
+    this.executeGov(gres);
+    // econ executes ALL the money the two fields commanded (transport's own
+    // hires are advisory — both operators already staff themselves through
+    // Business.decide + the labour market; gov rosters are the real payroll).
+    const cmds: CivicEconCommands = {
+      levies: { payrollRate: gres.levies.payroll ?? 0, salesRate: gres.levies.sales ?? 0 },
+      hires: gres.hires.map((r) => ({ employerId: r.id, name: r.name, wage: r.wage, desired: r.desired, minSkill: r.minSkill })),
+      spendOrders: gres.spendOrders,
+      fareRevenue: tres.fareRevenue,
+    };
+    this.economy.applyCivic(cmds, this.clock);
+    this.refreshCivicCache();
+  }
+
+  /** the cheap between-tick caches the arbiter, society and transport read. */
+  private refreshCivicCache(): void {
+    const gv = this.gov.view();
+    this.civicCache = {
+      assembly: gv.assembly,
+      topics: this.gov.hotTopics(this.clock),
+      salience: new Map(gv.tierA.map((r) => [r.id, { salience: r.salience, support: r.support }])),
+      subsidy: gv.state === 'elected'
+        ? clamp(gv.policy.find((p) => p.kind === 'transit-subsidy')?.share ?? 0, 0, 1) : 0,
+    };
+  }
+
+  /** the material world, sliced for the opinion field. Treasury flows are the
+   *  DELTAS of econ's audited cumulative ledger — gov reconciles, never moves. */
+  private govInput(es: EconSnapshot, centers: { id: string; x: number; z: number }[], cci: number): GovTickInput {
+    const m = es.macro;
+    const cv = es.civic;
+    const cums = cv
+      ? { tax: cv.taxCum, borrow: cv.borrowCum, payroll: cv.payrollCum, spend: cv.spendCum, interest: cv.interestCum, repaid: cv.repaidCum }
+      : { ...this.lastCivic };
+    const credited = (cums.tax - this.lastCivic.tax) + (cums.borrow - this.lastCivic.borrow);
+    const debited = (cums.payroll - this.lastCivic.payroll) + (cums.spend - this.lastCivic.spend)
+      + (cums.interest - this.lastCivic.interest) + (cums.repaid - this.lastCivic.repaid);
+    this.lastCivic = cums;
+    const salient = [...this.civicCache.salience.entries()]
+      .filter(([, r]) => r.salience > 0.2).map(([id]) => id);
+    const pop = Math.max(es.shadow.n + ROSTER.length, 1);
+    return {
+      macro: {
+        unemployment: m.unemployment,
+        gini: m.gini,
+        cpi: m.cpi,
+        homeless: clamp(m.homelessCount / pop, 0, 1),
+        meanWage: m.meanWage,
+        // market rent per period over ~45 worked hours' wages — burden climbs
+        // exactly when rents outrun pay, which is the grievance that matters.
+        rentBurden: clamp(es.housing.rent / Math.max(m.meanWage * 45, 1e-6), 0, 1),
+      },
+      // transit grievance measures the EXCESS over the calm-town baseline (≈1):
+      // jams and fare hikes push it up; a subsidized, flowing network reads 0.
+      commuteCostIndex: clamp(cci - 1, 0, 1),
+      tierA: ROSTER.map((e) => {
+        const w = this.economy.walletOf(e.profile.id);
+        return { id: e.profile.id, wage: w?.wage ?? 0, employed: !!w?.employer, homeless: !!w?.homeless, money: w?.money ?? 0 };
+      }),
+      shadowHouseholds: es.shadow.n,
+      adjacency: { density01: this.society.linkDensity(salient) },
+      // the camera watches; it does not sign the attendance sheet.
+      hotCenters: centers.filter((c) => c.id !== 'observer'),
+      civicVenues: CIVIC_VENUES(),
+      treasuryCredited: credited,
+      treasuryDebited: debited,
+    };
+  }
+
+  /** shadow aggregates + operator posture for the street layer. Fares/fleets
+   *  come from the REAL firms — no authority, no buses; broke taxi co, no cabs. */
+  private transportInput(es: EconSnapshot, centers: { id: string; x: number; z: number }[]): TransportTickInput {
+    const ta = this.economy.transportAggregates();
+    const sh = es.shadow;
+    const taxi = es.businesses.find((b) => b.id === 'biz-taxi' && !b.bankrupt);
+    const auth = es.businesses.find((b) => b.id === AUTHORITY_ID && !b.bankrupt);
+    return {
+      centers,
+      shadow: {
+        households: sh.n,
+        employed: sh.employed,
+        carOwnership: clamp(sh.carOwners / Math.max(sh.n, 1), 0, 1),
+        bikeOwnership: clamp(sh.bikeOwners / Math.max(sh.n, 1), 0, 1),
+      },
+      commuteOD: this.commuteOD(),
+      prices: { busFare: auth ? ta.fare : undefined, taxiBase: taxi?.price },
+      fleet: {
+        taxis: taxi?.headcount ?? 0,
+        taxiOperatorId: 'biz-taxi',
+        transitVehicles: auth?.headcount ?? 0,
+        transitOperatorId: auth?.id,
+      },
+      subsidy: this.civicCache.subsidy,
+    };
+  }
+
+  /** commute demand geography: every premises firm pulls 'home' commuters
+   *  toward its nearest street anchor — demand follows the real economy. The
+   *  two Tier-A workplaces anchor the pattern by their actual headcounts. */
+  private commuteOD(): { from: string; to: string; weight: number }[] {
+    const acc = new Map<string, number>();
+    const add = (id: string, wgt: number) => { if (id !== 'home') acc.set(id, (acc.get(id) ?? 0) + wgt); };
+    add('office', 3);
+    add('work', 2);
+    for (const v of this.economy.venuePoints()) add(this.nearestAnchorId(v.x, v.z), 1);
+    return [...acc.entries()].map(([to, weight]) => ({ from: 'home', to, weight }));
+  }
+
+  private nearestAnchorId(x: number, z: number): string {
+    let best = 'market', bestD = Infinity;
+    for (const a of this.anchors) {
+      const d = (a.x - x) * (a.x - x) + (a.z - z) * (a.z - z);
+      if (d < bestD) { bestD = d; best = a.id; }
     }
+    return best;
+  }
+  private readonly anchors = netAnchors();
+
+  /** execute a gov tick's world-side commands: the world owns every memory
+   *  write, every feed post and every perceived moment — gov only asked. */
+  private executeGov(res: GovTickResult): void {
+    for (const mw of res.memoriesToWrite) {
+      const ch = this.chById.get(mw.characterId);
+      if (ch) ch.memory.add(this.clock, mw.text, ch.soma);
+    }
+    if (res.feedPosts.length) this.society.injectCivicPosts(res.feedPosts, this.clock);
+    for (const we of res.worldEvents) {
+      const ch = this.chById.get(we.targetId);
+      if (!ch) continue;
+      const e = ev('civic', we.description, we.salienceHint, we.valenceHint);
+      ch.perceive(e);
+      ch.applyDriverResponse(e, fallbackResponse(ch.soma, ch.readout(), e));
+    }
+  }
+
+  /** the civic channel Society threads through conversations + the feed. */
+  private civicEnv(): CivicEnv {
+    const cc = this.civicCache;
+    return {
+      hotTopics: cc.topics,
+      assembly: cc.assembly,
+      salienceOf: (id) => cc.salience.get(id)?.salience ?? 0,
+      onConversation: (aId, bId, topic, warmth, tAB, tBA, clock) =>
+        this.gov.onConversation(aId, bId, topic, warmth, tAB, tBA, clock),
+      onFeedEngagement: (readerId, kind, authorId) =>
+        this.gov.onFeedEngagement(readerId, kind as CivicPostKind, authorId, this.clock),
+    };
+  }
+
+  /** transport-priced commute duration between two macro places (society hook). */
+  private commuteDur(from: AgentPlace, to: AgentPlace): number {
+    const f = this.agentPlaceM(from), t = this.agentPlaceM(to);
+    if (!f || !t) return 0.08;
+    return this.transport.costEstimate(f, t, this.clock).durH;
+  }
+
+  private agentPlaceM(pl: AgentPlace): { x: number; z: number } | null {
+    switch (pl) {
+      case 'home': return placeM('home');
+      case 'foodcourt': return placeM('work');
+      case 'office': return { ...OFFICE_M };
+      case 'assembly': {
+        const asm = this.civicCache.assembly;
+        return asm && asm.place === 'foodcourt' ? placeM('work') : placeM('park');
+      }
+      default: return null;
+    }
+  }
+
+  /** world-metre positions of attention: one center PER Tier-A agent (profile
+   *  ids — gov keys assembly attendance by them), commuters interpolated along
+   *  their walk (the hot radius travels with the body), Mara's continuous
+   *  macroPos (posOf-driven while she rides), plus the camera-observer. */
+  private causalCenters(): { id: string; x: number; z: number }[] {
+    const centers: { id: string; x: number; z: number }[] = [
+      { id: ROSTER[0].profile.id, ...toM(this.macroPos) },
+    ];
+    for (const a of this.society.agentPlacements()) {
+      let p: { x: number; z: number } | null;
+      if (a.place === 'commuting') {
+        const f = this.agentPlaceM(a.from), t = this.agentPlaceM(a.to);
+        p = f && t ? { x: lerp(f.x, t.x, a.commuteT), z: lerp(f.z, t.z, a.commuteT) } : (f ?? t);
+      } else {
+        p = this.agentPlaceM(a.place);
+      }
+      if (p) centers.push({ id: a.id, x: p.x, z: p.z });
+    }
+    if (this.observer) centers.push({ id: 'observer', x: this.observer.x, z: this.observer.z });
     return centers;
+  }
+
+  /** the camera as a real sim-side observer — main.ts feeds it each frame
+   *  beside setFocus. What is looked at is what gets discretized. */
+  setObserver(camX: number, camZ: number, mapOpen: boolean): void {
+    this.observer = { x: camX, z: camZ, mapOpen };
   }
 
   /** the lightweight boredom/stimulation proxy Mara's phone loop reads (she has no
@@ -320,6 +590,7 @@ export class Town {
       current: this.goal?.intention,
       habit: (p, k) => this.habit(p, k),
       rng: this.rng,
+      civic: this.assemblyCtx(),
     });
     if (intent.place !== this.place && openNow(PLACES[intent.place], this.clock)) {
       this.startTravel(intent);
@@ -338,6 +609,32 @@ export class Town {
     return mems.reduce((s, m) => s + m.salience, 0) / mems.length;
   }
 
+  /** the assembly as a live pull on Mara — only while one is called (± the
+   *  walk-over margin), scaled by HER civic salience/support. No salience, no
+   *  pull: seeded neighbours go; an untouched Mara stays home. */
+  private assemblyCtx(): { place: PlaceId; pull: number } | null {
+    const asm = this.civicCache.assembly;
+    if (!asm || this.clock < asm.startH - 1.5 || this.clock > asm.endH) return null;
+    const me = this.civicCache.salience.get(ROSTER[0].profile.id);
+    const sal = me?.salience ?? 0;
+    if (sal < 0.12) return null;
+    const place: PlaceId = asm.place === 'foodcourt' ? 'work' : 'park';
+    return { place, pull: clamp(sal * (0.6 + 0.6 * Math.max(0, me?.support ?? 0)), 0, 1.2) };
+  }
+
+  /** memory → mode habit: remembered rides bias the mode logit ($-equivalent;
+   *  negative favors). One bad taxi ride causally suppresses the next one. */
+  private modeBias(): Partial<Record<ModeId, number>> {
+    const out: Partial<Record<ModeId, number>> = {};
+    for (const mode of ['bus', 'taxi'] as ModeId[]) {
+      const mems = this.mara.recall(`${mode} ride`, 2);
+      if (!mems.length) continue;
+      const v = mems.reduce((s, m) => s + m.salience * m.valence, 0) / mems.length;
+      if (v !== 0) out[mode] = -3 * v;
+    }
+    return out;
+  }
+
   private durOf(intent: Intention): number {
     const a = PLACES[intent.place].affordances.find((x) => x.kind === intent.kind);
     return a?.durHours ?? 1;
@@ -351,23 +648,49 @@ export class Town {
     this.travelFrom = { ...this.macroPos };
     this.travelTo = { ...PLACES[intent.place].pos2D };
     this.travelT = 0;
-    this.travelDur = Math.max(0.02, travelTime(this.place, intent.place));
+    // a REAL street journey: mode chosen by generalized cost + memory habit,
+    // the fare debited up front (the town rent pattern — her mirrored ledger).
+    const plan = this.transport.planTrip({
+      from: toM(this.macroPos),
+      to: placeM(intent.place),
+      wageRate: 90 / 8,                     // her shift pays $90 over ~8h
+      fatigue: this.mara.soma.fatigue,
+      traits: { openness: clamp(0.5 + 0.2 * this.mara.profile.bigFive.O, 0, 1) },
+      habitBias: this.modeBias(),
+    }, this.clock);
+    if (plan.money > 0) this.resources.money -= plan.money;
+    this.maraTrip = this.transport.startTrip(plan, ROSTER[0].profile.id, this.clock);
+    this.travelDur = Math.max(0.02, plan.durH);
     this.goal = { intention: intent, phase: 'travel', startedAt: this.clock, plannedEnd: this.clock + this.travelDur };
     this.currentEvent = ev('travel', `Heading to the ${PLACES[intent.place].name.toLowerCase()} — ${intent.reason}.`, 0.2, 0.05);
   }
 
   private advanceTravel(dt: number): void {
     this.travelT = clamp(this.travelT + dt / this.travelDur, 0, 1);
-    this.macroPos = {
-      x: lerp(this.travelFrom.x, this.travelTo.x, this.travelT),
-      y: lerp(this.travelFrom.y, this.travelTo.y, this.travelT),
-    };
+    if (this.maraTrip) {
+      // sample the trip's polyline at journey-time (travelDur is clamped so a
+      // one-minute hop still reads as movement; posOf itself is pure in time).
+      const p = this.transport.posOf(this.maraTrip, this.maraTrip.departH + this.travelT * this.maraTrip.durH);
+      this.macroPos = toTown(p);
+    } else {
+      this.macroPos = {
+        x: lerp(this.travelFrom.x, this.travelTo.x, this.travelT),
+        y: lerp(this.travelFrom.y, this.travelTo.y, this.travelT),
+      };
+    }
     // travelling costs a little energy
     this.mara.soma.fatigue = clamp(this.mara.soma.fatigue + dt * 0.02, 0, 1);
     if (this.travelT >= 1) {
       this.travelling = false;
       this.place = this.goal.intention.place;
       this.macroPos = { ...PLACES[this.place].pos2D };
+      // a paid ride lays down the memory the next mode choice will recall.
+      if (this.maraTrip && this.maraTrip.mode !== 'walk') {
+        this.mara.memory.add(this.clock,
+          `Took the ${this.maraTrip.mode} ride to the ${PLACES[this.place].name.toLowerCase()}; $${this.maraTrip.money.toFixed(2)} and ${Math.max(1, Math.round(this.maraTrip.durH * 60))} minutes.`,
+          this.mara.soma);
+      }
+      this.maraTrip = null;
       this.goal = { ...this.goal, phase: 'execute', startedAt: this.clock, plannedEnd: this.clock + this.durOf(this.goal.intention) };
       this.enterLocale(this.place);
     }
@@ -755,6 +1078,8 @@ export class Town {
       company: this.society.companySnapshot(),
       economy: this.economy.snapshot(),
       causal: this.causal.view(),
+      gov: this.gov.view(),
+      transport: this.transport.view(),
     };
   }
 
@@ -780,6 +1105,9 @@ export class Town {
       focusIndex: this.focusIndex, speed: this.speed, paused: this.paused,
       economy: this.economy.toJSON(),
       causal: this.causal.toJSON(),
+      gov: this.gov.toJSON(),
+      transport: this.transport.toJSON(),
+      maraTrip: this.maraTrip,
     };
   }
 
@@ -810,7 +1138,19 @@ export class Town {
     this.pendingLLM = false;
     if (j.economy) this.economy.loadJSON(j.economy);
     if (j.causal) this.causal.loadJSON(j.causal);
+    if (j.gov) this.gov.loadJSON(j.gov);
+    if (j.transport) this.transport.loadJSON(j.transport);
+    this.maraTrip = j.maraTrip ?? null;
+    this.observer = null;
     this.lastCausalSeq = -1; this.lastCausalClock = this.clock;
+    // rebuild the between-tick caches from the restored fields — recomputable,
+    // so they never widen the snapshot. The econ cums equal what they were at
+    // save time (applyCivic is the only writer, and it rides the gov tick).
+    this.refreshCivicCache();
+    const cv = this.economy.snapshot().civic;
+    this.lastCivic = cv
+      ? { tax: cv.taxCum, borrow: cv.borrowCum, payroll: cv.payrollCum, spend: cv.spendCum, interest: cv.interestCum, repaid: cv.repaidCum }
+      : { tax: 0, borrow: 0, payroll: 0, spend: 0, interest: 0, repaid: 0 };
   }
 
   /** the deterministic RNG conversation closures capture — used on restore. */
@@ -836,6 +1176,9 @@ export interface TownJSON {
   focusIndex: number; speed: number; paused: boolean;
   economy?: EconJSON;
   causal?: unknown;
+  gov?: unknown;
+  transport?: unknown;
+  maraTrip?: TripHandle | null;
 }
 
 /** module id-counter accessors (for save/load reconciliation). */

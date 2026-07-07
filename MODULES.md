@@ -9,7 +9,7 @@ through `src/core/types.ts` (the shared contract) and should be coordinated.
 ## Dependency direction
 
 ```
-core  ←  { llm, mind, econ }  ←  world  ←  persist
+core  ←  { llm, mind, econ, causal, gov, transport }  ←  world  ←  persist
 ```
 
 - Arrows point from *dependent* to *dependency* (right depends on left being stable).
@@ -82,6 +82,37 @@ core  ←  { llm, mind, econ }  ←  world  ←  persist
 - **May import from:** `core/` only. Pure: no THREE, no DOM, no town imports.
 - Verified standalone by `scripts/causal-smoke.ts`.
 
+## src/gov/ — emergent government (POLIS)
+
+- **Owns:** the civic phase-transition machinery (see `POLIS_DESIGN.md`):
+  `opinion.ts` (Tier-A salience side-table + shadow opinion field),
+  `movement.ts` (percolation threshold, assembly calling, influence),
+  `charter.ts` (motions, ballots, conserved vote tallies, legitimacy,
+  recall), `treasury.ts` (pure levy/spend ledger — execution stays in econ),
+  `officials.ts` (MindLite-on-demand officials), `seeds.ts` (the three civic
+  seed-memory sets), `history.ts`, `govsim.ts`/`index.ts` (`GovField`
+  facade), `types.ts`.
+- **Entry points:** `GovField` (`index.ts`), `gov/types.ts`.
+- **May import from:** `core/`, `causal/` (gate/stats reuse), and *types
+  only* from `econ/types.ts`. Pure: no THREE, no DOM, no town imports;
+  moves no money — it emits commands the world/econ execute.
+- Verified standalone by `scripts/gov-smoke.ts`.
+
+## src/transport/ — streets, modes, crowds
+
+- **Owns:** the mobility layer (see `TRANSPORT_DESIGN.md`): `netgraph.ts`
+  (THE canonical street graph — render draws from it), `routing.ts` (A* +
+  generalized cost + logit mode choice), `odfield.ts` (learned demand),
+  `congestion.ts`, `fleet.ts` (taxi/transit operations), `transitplan.ts`
+  (routes synthesized from demand), `signals.ts`, `pedsim.ts` (social-force
+  pedestrians, hot-only), `history.ts`, `transportsim.ts`/`index.ts`
+  (`TransportField` facade), `types.ts`.
+- **Entry points:** `TransportField` (`index.ts`), `netgraph.ts` (read-only
+  for render), `transport/types.ts`.
+- **May import from:** `core/`, `causal/`, and *types only* from
+  `econ/types.ts`. Pure; moves no money (fares/purchases execute in econ).
+- Verified standalone by `scripts/transport-smoke.ts`.
+
 ## src/world/ — the town / society layer
 
 - **Owns:** the level-of-detail town that composes minds + economy into a
@@ -90,7 +121,8 @@ core  ←  { llm, mind, econ }  ←  world  ←  persist
   `arbiter.ts` (needs → action), `society.ts`, `events.ts`, `conversation.ts`,
   `relationship.ts`, `socialaffect.ts`, `interests.ts`, `feed.ts`, `company.ts`.
 - **Entry points:** `Town` (`town.ts`), `society.ts`, `places.ts`.
-- **May import from:** `core/`, `llm/`, `mind/`, `econ/`, `causal/`.
+- **May import from:** `core/`, `llm/`, `mind/`, `econ/`, `causal/`,
+  `gov/`, `transport/`.
 
 ## src/persist/ — save / load / branching
 
@@ -133,10 +165,11 @@ from every module.
 ## scripts/ — smoke tests & capture harnesses
 
 - `harness-smoke.ts` (fast, mind-only), `town-smoke.ts` (~minutes, whole town),
-  `econ-smoke.ts` (~3 min, 33 economy checks, prints `ALL PASS`), plus
-  headless capture scripts (`*.mjs`). All have offline fallbacks if Ollama
-  isn't running.
-- Verify any refactor with: `npx tsc --noEmit` + the three smoke scripts.
+  `econ-smoke.ts` (~3 min, economy checks, prints `ALL PASS`),
+  `causal-smoke.ts`, `gov-smoke.ts`, `transport-smoke.ts` (standalone module
+  scenarios), plus headless capture scripts (`*.mjs`). All have offline
+  fallbacks if Ollama isn't running.
+- Verify any refactor with: `npx tsc --noEmit` + the smoke scripts.
 
 ## Working in parallel
 

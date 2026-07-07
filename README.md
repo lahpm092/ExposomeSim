@@ -57,6 +57,8 @@ a slow **allostatic-load** integrator that is the exposome's memory.
 | world | `world/town.ts`, `world/arbiter.ts`, `world/places.ts` | the level-of-detail town; needs-arbitrated agency |
 | econ | `econ/econsim.ts` + module | the emergent market economy: firms/supply chains/premises, banking + Fed, shadow population (`ECONOMY_EMERGENCE.md`, `WORLD_EXPANSION.md`) |
 | causal | `causal/index.ts` | the **causal radius**: full event-resolution near main characters; everywhere else drifts on a **learned average-causality surrogate** |
+| gov | `gov/index.ts` + module | **emergent government**: seeded civic memories → opinion contagion → assemblies → ballots → treasury/levies/offices — a phase transition, never a script (`POLIS_DESIGN.md`) |
+| transport | `transport/index.ts` + module | **the price of distance**: street graph, mode choice, congestion, taxis/transit/dealers, signals + social-force pedestrians — hot when observed, bookkeeping when not (`TRANSPORT_DESIGN.md`) |
 | render | `render/citystage.ts` | three.js — the **orbit-camera 3D city** + LOD |
 | | `render/worldgeo.ts` · `render/humanoid.ts` | low-poly black-mesh buildings & **articulated humanoids** |
 | | `render/brain.ts` | MRI brain instrument with **live activation glow** |

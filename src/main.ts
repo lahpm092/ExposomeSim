@@ -12,6 +12,7 @@ import { CityView } from './render/cityview';
 import { PsychePanel } from './render/psycheviz';
 import { MemoryPanel } from './render/memoryviz';
 import { EconViz } from './render/econviz';
+import { PolisViz } from './render/polisviz';
 import { SkyClock } from './render/skyclock';
 import { TownPanel } from './ui/townpanel';
 import { Dashboard } from './ui/dashboard';
@@ -71,9 +72,10 @@ async function boot() {
   const psyche = new PsychePanel(stageEl, titlebar);
   const memory = new MemoryPanel(stageEl, titlebar);
   const econViz = new EconViz(stageEl, titlebar);
+  const polisViz = new PolisViz(stageEl, titlebar);
   const skyclock = new SkyClock(stageEl, titlebar);
 
-  addEventListener('resize', () => { stage.resize(); brain.resize(); city.resize(); psyche.resize(); memory.resize(); econViz.resize(); skyclock.resize(); });
+  addEventListener('resize', () => { stage.resize(); brain.resize(); city.resize(); psyche.resize(); memory.resize(); econViz.resize(); polisViz.resize(); skyclock.resize(); });
   addEventListener('keydown', (e) => {
     const town = session.town;
     if (e.code === 'Space') { e.preventDefault(); town.togglePause(); }
@@ -81,6 +83,7 @@ async function boot() {
     else if (e.key === '-') town.setSpeed(Math.max(0.002, town.speed / 1.5));
     else if (e.key === 'c' || e.key === 'C') city.toggle();
     else if (e.key === 'e' || e.key === 'E') econViz.toggle();
+    else if (e.key === 'g' || e.key === 'G') polisViz.toggle();
     else if ((e.key === 's' || e.key === 'S') && (e.metaKey || e.ctrlKey)) { e.preventDefault(); session.save(); branchBar.render(true); }
     else if (e.key === 'b' || e.key === 'B') { session.branch(); branchBar.render(true); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); brain.selectPrev(); }
@@ -91,6 +94,10 @@ async function boot() {
     const town = session.town;           // read fresh: load/restart/jump hot-swaps it
     town.update(dtReal);
     town.setFocus(stage.focusIndex);     // the camera's followed agent drives the inspectors
+    // the camera is a sim-side observer: a real causal center for the street/
+    // civic gates (setObserver is the back-channel beside setFocus).
+    const obs = stage.observerXZ;
+    town.setObserver(obs.x, obs.z, city.isOpen);
     const snap = town.snapshot();
     stage.update(snap, dtReal);
     dashboard.update(snap);
@@ -103,6 +110,7 @@ async function boot() {
     psyche.update(snap, dtReal);
     memory.update(snap, dtReal);
     econViz.update(snap, dtReal);
+    polisViz.update(snap, dtReal);
     skyclock.update(snap);
     branchBar.render();
     session.autosaveTick(dtReal);
@@ -112,7 +120,7 @@ async function boot() {
 
   // debug/verification hook: drive the whole frame loop deterministically even
   // when the tab is backgrounded (requestAnimationFrame is throttled while hidden).
-  const dbg: any = { session, stage, brain, psyche, memory, econViz, skyclock, branchBar, tick };
+  const dbg: any = { session, stage, brain, psyche, memory, econViz, polisViz, city, skyclock, branchBar, tick };
   Object.defineProperty(dbg, 'town', { get: () => session.town });
   (window as any).__dbg = dbg;
 

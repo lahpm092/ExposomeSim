@@ -17,6 +17,8 @@
 // the Town surfaces a snapshot of it on TownSnapshot for the HUD.
 import type { CausalView } from '../causal/types';
 import type { EconSnapshot } from '../econ/types';
+import type { GovView } from '../gov/types';
+import type { TransportView } from '../transport/types';
 export type { EconSnapshot };
 
 export type Allele2 = 0 | 1 | 2;
@@ -360,7 +362,8 @@ export interface Physiology {
 export type PlaceId = 'home' | 'work' | 'market' | 'thirdplace' | 'park';
 export type IntentionKind =
   | 'eat' | 'buy_meal' | 'drink' | 'relieve' | 'bathe'
-  | 'rest' | 'work' | 'shop' | 'socialize' | 'go_home' | 'linger';
+  | 'rest' | 'work' | 'shop' | 'socialize' | 'go_home' | 'linger'
+  | 'attend_assembly';
 
 export interface Affordance {
   kind: IntentionKind;
@@ -482,6 +485,8 @@ export interface TownSnapshot extends WorldSnapshot {
   company?: CompanySnapshot; // the office's emergent goal, teams and internal net
   economy?: EconSnapshot;  // the market economy: wallets, firms, prices, labour, macro
   causal?: CausalView;     // the causal radius + learned venue surrogate (hot set, stats)
+  gov?: GovView;           // the emergent-government field (opinion, ballots, treasury)
+  transport?: TransportView; // streets, congestion, transit, trips, stop surrogates
 }
 
 /** A second full-resolution protagonist, projected for the renderer + dashboard. */
@@ -512,8 +517,9 @@ export type RoleKind =
 
 export type Workplace = 'foodcourt' | 'office' | 'construction';
 
-/** where an agent's BODY is, for the renderer (macro placement). */
-export type AgentPlace = 'home' | 'foodcourt' | 'office' | 'commuting';
+/** where an agent's BODY is, for the renderer (macro placement). 'assembly' is
+ *  a borrowed civic venue (park/foodcourt) — it exists only while one is called. */
+export type AgentPlace = 'home' | 'foodcourt' | 'office' | 'commuting' | 'assembly';
 
 /** what an agent is doing this beat — drives the render pose AND the work-psych context. */
 export type WorkMode =
@@ -629,8 +635,9 @@ export interface FeedPost {
   topic: string;         // the interest/theme the post is about (drives resonance)
   text: string;
   valence: number;       // author affect at posting [-1,1]
-  likes: string[];       // ids of agents who liked it
+  likes: string[];       // ids of agents who liked it (a petition's signature list)
   comments: FeedComment[];
+  kind?: string;         // civic posts: 'petition'|'announcement'|'ballot'|'result'
 }
 /** A bounded snapshot of the feed for the UI panel (most-recent first). */
 export interface FeedView {

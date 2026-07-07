@@ -56,13 +56,16 @@ export function restoreConversation(
  * caller has already found co-located and free to talk, and if so build it. The
  * basis is a shared interest OR a roll for small talk; the odds rise with
  * Big-Five compatibility and with any standing rapport already in the ledgers.
- * Returns the live Conversation, or null when nothing sparks.
+ * `extraTopics` are the currently-hot civic topics (gov.hotTopics) merged into
+ * the shared-candidate pool — they widen WHAT gets talked about, never WHETHER
+ * a conversation sparks. Returns the live Conversation, or null.
  */
 export function maybeStartConversation(
   a: Character, b: Character,
   aInterests: string[], bInterests: string[],
   ledgerAB: Ledger, ledgerBA: Ledger,   // a's ledger-of-b, and b's ledger-of-a
   clock: number, rng: () => number,
+  extraTopics: string[] = [],
 ): Conversation | null {
   const shared = sharedInterests(aInterests, bInterests);
   const compat = compatibility(a, b);           // [0,1]
@@ -76,8 +79,10 @@ export function maybeStartConversation(
   p = clamp(p, 0.02, 0.97);
   if (rng() >= p) return null;
 
-  // topic: a random real shared interest if any, else lower-warmth small talk.
-  const topic = shared.length ? shared[Math.floor(rng() * shared.length)] : 'small talk';
+  // topic: a random draw from real shared interests ∪ hot civic topics, else
+  // lower-warmth small talk. Civic topics ride the same channel — no new layer.
+  const pool = [...shared, ...extraTopics];
+  const topic = pool.length ? pool[Math.floor(rng() * pool.length)] : 'small talk';
   const beatsLeft = 4 + Math.floor(rng() * 6);  // 4..9 beats
 
   // ensure each side has a ledger entry for the other, keyed by profile.id.
@@ -121,8 +126,11 @@ class TwoBodyConversation implements Conversation {
     this.aId = aId; this.bId = bId;
     this.clock = clock;
     this.rng = rng;
-    this.isShared = topic !== 'small talk';
-    this.lastUtterance = this.isShared ? `Wait — you're into ${topic}?` : 'Oh, hey there.';
+    // civic topics aren't hobbies: they enter the pool but carry no shared-joy warmth.
+    this.isShared = topic !== 'small talk' && !topic.startsWith('civic:');
+    const label = topicLabel(topic);
+    this.lastUtterance = this.isShared ? `Wait — you're into ${label}?`
+      : topic.startsWith('civic:') ? `Have you been thinking about ${label} too?` : 'Oh, hey there.';
   }
 
   step(dtHours: number): void {
@@ -162,12 +170,15 @@ class TwoBodyConversation implements Conversation {
     // --- encode the moment in BOTH memory graphs ------------------------------
     this.clock += dtHours;
     const feel = warm > 0.2 ? 'good' : warm < -0.1 ? 'awkward' : 'ok';
-    a.memory.add(this.clock, `Talked with ${b.profile.name} about ${this.topic}; it felt ${feel}.`, a.soma);
-    b.memory.add(this.clock, `Talked with ${a.profile.name} about ${this.topic}; it felt ${feel}.`, b.soma);
+    const label = topicLabel(this.topic);
+    a.memory.add(this.clock, `Talked with ${b.profile.name} about ${label}; it felt ${feel}.`, a.soma);
+    b.memory.add(this.clock, `Talked with ${a.profile.name} about ${label}; it felt ${feel}.`, b.soma);
 
     // --- surface state for the caller / speech bubble -------------------------
     this.lastWarm = warm;
-    this.lastUtterance = utteranceFor(warm, this.topic, this.isShared, rng);
+    this.lastUtterance = this.topic.startsWith('civic:')
+      ? civicUtterance(warm, label, rng)
+      : utteranceFor(warm, label, this.isShared, rng);
     this.beatsLeft -= 1;
     this.done = this.beatsLeft <= 0;
   }
@@ -183,6 +194,19 @@ class TwoBodyConversation implements Conversation {
 /** Big-Five pair compatibility in [0,1] — delegates to the shared metric. */
 function compatibility(a: Character, b: Character): number {
   return bigFiveCompat(a.profile.bigFive, b.profile.bigFive);
+}
+
+/** how a civic topic slug reads in prose (memories, utterances). Raw interests
+ *  pass through untouched; the raw 'civic:<slug>' string stays gov's key. */
+const CIVIC_LABEL: Record<string, string> = {
+  'civic:jobs': 'the work drying up', 'civic:rent': 'the rents',
+  'civic:prices': 'prices climbing', 'civic:wages': 'what work pays here',
+  'civic:transit': 'getting across town', 'civic:assembly': 'the assembly',
+  'civic:charter': 'the charter', 'civic:election': 'the election',
+  'civic:recall': 'the recall',
+};
+export function topicLabel(topic: string): string {
+  return CIVIC_LABEL[topic] ?? (topic.startsWith('civic:') ? 'what this town is failing at' : topic);
 }
 
 /** A short first-person line, varying by warmth and topic. Deterministic in rng. */
@@ -211,6 +235,22 @@ function utteranceFor(warm: number, topic: string, isShared: boolean, rng: () =>
   if (warm > 0.1) return pick(rng, [`So, how's your day going?`, `Bit of a quiet one today, isn't it?`]);
   if (warm > -0.1) return pick(rng, [`Anyway.`, `Right, well.`]);
   return pick(rng, [`I should probably get going.`, `Well — this is a little awkward.`]);
+}
+
+/** civic beats read as neighbours comparing notes, warm or wary. */
+function civicUtterance(warm: number, label: string, rng: () => number): string {
+  if (warm > 0.3) return pick(rng, [
+    `It's not just you — everyone I ask is carrying ${label}.`,
+    `Honestly, if enough of us said it out loud, ${label} might actually move.`,
+  ]);
+  if (warm > -0.1) return pick(rng, [
+    `Yeah, ${label}… I don't know what anyone does about that.`,
+    `${label.charAt(0).toUpperCase()}${label.slice(1)} — same everywhere, I suppose.`,
+  ]);
+  return pick(rng, [
+    `I'd rather not get pulled into anything about ${label}, honestly.`,
+    `People keep on about ${label}; I keep my head down.`,
+  ]);
 }
 
 function pick<T>(rng: () => number, xs: T[]): T {

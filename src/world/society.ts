@@ -30,6 +30,7 @@ import {
 } from '../mind/roster';
 import { seedInterests } from './interests';
 import { maybeStartConversation, restoreConversation, type Conversation, type ConversationJSON } from './conversation';
+import { isCivicTopic } from '../gov/index';
 import { distillSummary } from './relationship';
 import type { Relationship } from '../core/types';
 import type { CompanyJSON } from './company';
@@ -39,7 +40,7 @@ import {
 } from '../mind/workpsych';
 import { createPhoneState, stepPhone, rolloverPhone, type PhoneCtx } from '../mind/phone';
 import { sleepPropensity, sleepDriveOf, melatoninGate, type SleepCtx } from '../mind/sleep';
-import { PublicFeed, type FeedMember } from './feed';
+import { PublicFeed, type FeedMember, type CivicFeedHook } from './feed';
 import { Company, type CompanyMemberView } from './company';
 import type { AgentEconInput } from '../econ/types';
 import { fallbackResponse } from '../llm/prompt';
@@ -64,6 +65,32 @@ export interface MaraMacro {
   onPhone?: boolean;              // whether Mara is on her phone (so the feed includes her)
 }
 
+/** the gov back-channel the Town threads into step(): hot topics for the
+ *  conversation pool, the assembly window, per-agent civic salience, and the
+ *  two engagement reporters. All optional — a world without a gov field (or a
+ *  field still dormant) hands nothing and society runs exactly as before. */
+export interface CivicEnv {
+  hotTopics: string[];
+  assembly: { place: string; startH: number; endH: number } | null;
+  salienceOf: (id: string) => number;
+  onConversation: (aId: string, bId: string, topic: string, warmth: number,
+                   trustAB: number, trustBA: number, clock: number)
+    => { memoryA: string | null; memoryB: string | null } | null;
+  onFeedEngagement: (readerId: string, kind: string, authorId: string) => void;
+}
+
+export interface SocietyEnv {
+  clock: number; weekday: boolean; rng: RNG;
+  /** transport-priced commute duration (sim-h) between two macro places —
+   *  installed by the Town; absent ⇒ the old instantaneous flip. */
+  commuteH?: (from: AgentPlace, to: AgentPlace) => number;
+  civic?: CivicEnv | null;
+}
+
+// walking this compressed town is metre-true (~a sim-minute); clamp commutes so
+// the 'commuting' state is actually visible to the renderer and the causal layer.
+const MIN_COMMUTE_H = 0.06;
+
 interface Runtime {
   idx: number;
   entry: RosterEntry;
@@ -79,6 +106,10 @@ interface Runtime {
   cleanWp: number;                // cleaner: current mop waypoint
   atWork: boolean;                // hysteresis latch for the work window
   asleep: boolean;                // emergent sleep latch (home only)
+  commuteFrom: AgentPlace;        // live commute (place === 'commuting')
+  commuteTo: AgentPlace;
+  commuteT: number;               // 0..1 progress along the commute
+  commuteDur: number;             // sim-hours (transport-priced)
   phone: PhoneState;              // per-agent phone / social-media engagement
   eventAcc: number;
   jitter: number;                 // per-agent phase jitter on the work window
@@ -87,7 +118,7 @@ interface Runtime {
   saying?: string;                // the current spoken line (bubble)
 }
 
-interface ActiveConvo { conv: Conversation; a: number; b: number; beatAcc: number; commons: number; }
+interface ActiveConvo { conv: Conversation; a: number; b: number; beatAcc: number; commons: number; civicDone?: boolean; }
 
 export class Society {
   private readonly rts: Runtime[] = [];
@@ -98,14 +129,20 @@ export class Society {
   private readonly company: Company;               // the office's emergent organisation
   private maraBelonging = 0;                        // feed→socialFuel bump owed to the Town
   private rolloverDay = -1;                         // last ~04:00 phone-session rollover
+  /** conversations that actually carried a civic stance payload (observability). */
+  civicExchanges = 0;
 
-  constructor(mara: Character, opts: { seed?: number; startHour?: number } = {}) {
+  constructor(mara: Character, opts: { seed?: number; startHour?: number; civicSeeds?: { characterId: string; texts: string[] }[] } = {}) {
     const startHour = opts.startHour ?? 8;
     ROSTER.forEach((entry, idx) => {
       const ch = idx === 0 ? mara : new Character(entry.profile, { seed: (opts.seed ?? 7) + idx * 101, startHour });
       // seed each character's interests into their OWN memory graph (durable
       // semantic nodes) so shared interests are recallable, not a lookup table.
       seedInterests(ch, entry.interests, startHour);
+      // the civic spark (gov.seedPlan): durable first-person memories, same
+      // channel as interests. They raise salience; they command nothing.
+      const civic = opts.civicSeeds?.find((s) => s.characterId === entry.profile.id);
+      if (civic?.texts.length) ch.memory.seed(civic.texts, startHour);
       const deskIndex = entry.role === 'office_worker' || entry.role === 'office_boss'
         ? (OFFICE_DESK_BY_ID[entry.profile.id] ?? -1) : -1;
       const team = entry.role === 'office_worker' ? (OFFICE_TEAM_BY_ID[entry.profile.id] ?? -1) : -1;
@@ -115,6 +152,7 @@ export class Society {
         wp: createWorkPsych(),
         place: 'home', mode: 'home', activity: 'stand', station: entry.homeIndex,
         deskIndex, team, cleanWp: 0, atWork: false, asleep: false,
+        commuteFrom: 'home', commuteTo: 'home', commuteT: 0, commuteDur: 0,
         phone: createPhoneState(), eventAcc: 0,
         jitter: (hash01(entry.profile.id) - 0.5) * 1.0,
         convoPartner: -1,
@@ -166,6 +204,35 @@ export class Society {
     return [...seen];
   }
 
+  /** per-agent macro placement for the causal/gov/transport centers (indices
+   *  1..n — Mara's continuous position is the Town's own). Commuters report
+   *  their endpoints + progress so the hot radius travels with the walk. */
+  agentPlacements(): { id: string; place: AgentPlace; from: AgentPlace; to: AgentPlace; commuteT: number }[] {
+    const out: { id: string; place: AgentPlace; from: AgentPlace; to: AgentPlace; commuteT: number }[] = [];
+    for (let i = 1; i < this.rts.length; i++) {
+      const rt = this.rts[i];
+      out.push({ id: rt.entry.profile.id, place: rt.place, from: rt.commuteFrom, to: rt.commuteTo, commuteT: rt.commuteT });
+    }
+    return out;
+  }
+
+  /** pairwise-link density among the given profile ids (gov's percolation
+   *  input): the share of pairs with ANY standing relationship between them. */
+  linkDensity(ids: readonly string[]): number {
+    const rows = ids
+      .map((id) => this.rts.find((r) => r.entry.profile.id === id))
+      .filter((r): r is Runtime => !!r);
+    if (rows.length < 2) return 0;
+    let links = 0, pairs = 0;
+    for (let i = 0; i < rows.length; i++) for (let j = i + 1; j < rows.length; j++) {
+      pairs++;
+      const ab = rows[i].ledger.get(rows[j].entry.profile.id)?.familiarity ?? 0;
+      const ba = rows[j].ledger.get(rows[i].entry.profile.id)?.familiarity ?? 0;
+      if (Math.max(ab, ba) > 0.05) links++;
+    }
+    return links / pairs;
+  }
+
   /** the public feed + the company state, for the Town's snapshot. */
   feedView(): FeedView { return this.feedNet.view(); }
   companySnapshot(): CompanySnapshot { return this.company.snapshot(); }
@@ -173,7 +240,7 @@ export class Society {
   takeMaraBelonging(): number { const v = this.maraBelonging; this.maraBelonging = 0; return v; }
 
   // ===================== per-tick ==========================================
-  step(dt: number, env: { clock: number; weekday: boolean; rng: RNG }): void {
+  step(dt: number, env: SocietyEnv): void {
     const hour = ((env.clock % 24) + 24) % 24;
     this.convoCooldown = Math.max(0, this.convoCooldown - dt);
 
@@ -194,22 +261,24 @@ export class Society {
     for (let i = 1; i < this.rts.length; i++) {
       const rt = this.rts[i];
       rt.ch.step(dt);                              // the substrate always lives
-      this.decidePlace(rt, hour, env.weekday);
+      this.decidePlace(rt, hour, dt, env);
       const boss1 = bossOnFloor && rt.entry.officeFloor === bossFloor;
-      if (rt.place === 'foodcourt') this.runFood(rt, hour, dt, env.rng);
-      else if (rt.place === 'office') this.runOffice(rt, dt, boss1, env.rng);
+      if (rt.place === 'commuting') this.runCommute(rt, dt);
+      else if (rt.place === 'assembly') this.runAssembly(rt, dt, env.rng);
+      else if (rt.place === 'foodcourt') this.runFood(rt, hour, dt, env.rng);
+      else if (rt.place === 'office') this.runOffice(rt, dt, boss1, env.rng, hour);
       else this.runHome(rt, hour, dt, env.weekday, env.rng);
       // the phone is always in reach: an emergent pull to check it, anywhere.
       this.stepAgentPhone(rt, hour, boss1, dt, env.rng);
     }
 
-    this.stepConversations(dt, env.clock);
-    this.matchmakeOffice(env.clock, env.rng);
+    this.stepConversations(dt, env.clock, env.civic ?? null);
+    this.matchmakeOffice(env.clock, env.rng, env.civic?.hotTopics ?? []);
 
     // the office as an organisation: teams coordinate on the net toward evolving goals.
     this.stepCompany(dt, env.clock);
     // the public social network: everyone (incl. Mara) posts / scrolls / is heard.
-    this.stepFeed(dt, env.clock, env.rng);
+    this.stepFeed(dt, env.clock, env.rng, env.civic ?? null);
   }
 
   // ---- phone / social-media pull (per agent, anywhere) ----------------------
@@ -247,34 +316,91 @@ export class Society {
   }
 
   // ---- the public feed: everyone, incl. Mara (via her projected onPhone) -----
-  private stepFeed(dt: number, clock: number, rng: RNG): void {
+  private stepFeed(dt: number, clock: number, rng: RNG, civic: CivicEnv | null): void {
     const members: FeedMember[] = this.rts.map((rt) => ({
       idx: rt.idx, id: rt.entry.profile.id, name: rt.entry.profile.name, hatColor: rt.entry.hatColor,
       ch: rt.ch, ledger: rt.ledger, interests: rt.entry.interests,
       onPhone: rt.idx === 0 ? !!this.mara.onPhone : rt.phone.onPhone,
       tom: rt.ch.params.neuro.theoryOfMind,
     }));
-    this.feedNet.step(dt, { clock, rng }, members);
+    const hook: CivicFeedHook | undefined = civic
+      ? { salienceOf: civic.salienceOf, onEngage: civic.onFeedEngagement }
+      : undefined;
+    this.feedNet.step(dt, { clock, rng }, members, hook);
     this.maraBelonging += this.feedNet.takeBelonging(this.rts[0].entry.profile.id);
   }
 
+  /** place gov's civic posts (petitions / announcements / ballots / results) on
+   *  the public feed, with the author resolved from the roster. An authorless
+   *  post (shadow candidate, vacated office) runs under the town wire account. */
+  injectCivicPosts(posts: readonly { kind: string; authorId: string; topic: string; text: string }[], clock: number): void {
+    for (const p of posts) {
+      const rt = this.rts.find((r) => r.entry.profile.id === p.authorId);
+      const valence = p.kind === 'petition' ? -0.25 : p.kind === 'result' ? 0.3 : 0.05;
+      this.feedNet.inject({
+        kind: p.kind,
+        authorId: rt ? p.authorId : 'town-wire',
+        authorName: rt ? rt.entry.profile.name : 'Town wire',
+        hatColor: rt ? rt.entry.hatColor : 0x9aa0a6,
+        topic: p.topic, text: p.text, valence,
+      }, clock);
+    }
+  }
+
   // ---- macro placement: a soft circadian window, gated by depletion ---------
-  private decidePlace(rt: Runtime, hour: number, weekday: boolean): void {
+  private decidePlace(rt: Runtime, hour: number, dt: number, env: SocietyEnv): void {
+    // mid-commute: walk it out; arrive when the (transport-priced) time is paid.
+    if (rt.place === 'commuting') {
+      rt.commuteT = rt.commuteDur > 1e-9 ? Math.min(1, rt.commuteT + dt / rt.commuteDur) : 1;
+      if (rt.commuteT >= 1) { rt.place = rt.commuteTo; rt.commuteT = 0; }
+      return;
+    }
     const [open, close] = this.workWindow(rt);
-    const inWindow = weekday && hour >= open + rt.jitter && hour < close + rt.jitter;
+    const inWindow = env.weekday && hour >= open + rt.jitter && hour < close + rt.jitter;
     const spent = rt.ch.soma.fatigue > 0.9;        // too wrecked to be at work
     if (!rt.atWork && inWindow && !spent) rt.atWork = true;
     else if (rt.atWork && (!inWindow || rt.ch.soma.fatigue > 0.95)) {
       rt.atWork = false;
       this.leaveConvo(rt.idx);
     }
-    const target: AgentPlace = rt.atWork
+    let target: AgentPlace = rt.atWork
       ? (rt.entry.workplace === 'foodcourt' ? 'foodcourt'
         : rt.entry.workplace === 'office' ? 'office'
         : 'home')   // construction crew work off-site → they read as home
       : 'home';
+    // a called assembly pulls the off-shift whose minds civics already occupy —
+    // Maslow gating for free: the wrecked and the hungry stay home (class turnout).
+    const asm = env.civic?.assembly;
+    if (asm && target === 'home'
+      && env.clock >= asm.startH - 0.5 && env.clock <= asm.endH
+      && (env.civic?.salienceOf(rt.entry.profile.id) ?? 0) > 0.25
+      && rt.ch.soma.fatigue < 0.85 && rt.ch.phys.satiety > 0.25) {
+      target = 'assembly';
+    }
     if (target !== 'home') rt.asleep = false;   // leaving for work wakes you
-    rt.place = target;
+    if (target === rt.place) return;
+    // interpose a REAL commute between macro places (no more teleporting).
+    const durH = env.commuteH?.(rt.place, target) ?? 0;
+    if (durH > 1e-9) {
+      rt.commuteFrom = rt.place; rt.commuteTo = target;
+      rt.commuteT = 0; rt.commuteDur = Math.max(durH, MIN_COMMUTE_H);
+      rt.place = 'commuting';
+    } else {
+      rt.place = target;
+    }
+  }
+
+  // ---- COMMUTING / ASSEMBLY: the two macro states outside home & venue ------
+  private runCommute(rt: Runtime, dt: number): void {
+    rt.mode = 'commuting'; rt.activity = 'walk'; rt.station = 0;
+    this.stepWp(rt, { onTask: false, socializing: false, standing: true, resting: false, novelty: 0.15, demand: 0.05, dtHours: dt });
+  }
+
+  private runAssembly(rt: Runtime, dt: number, rng: RNG): void {
+    rt.mode = 'idle'; rt.activity = 'stand'; rt.station = 0;
+    this.stepWp(rt, { onTask: false, socializing: true, standing: true, resting: false, novelty: 0.5, demand: 0.1, dtHours: dt });
+    this.tickEvents(rt, dt, rng, () =>
+      ev('assembly', 'Neighbours keep arriving; someone is writing the grievances up on a board, out loud, one by one.', 0.3, 0.1));
   }
 
   /** each role's rough daily window (hours). Not a schedule — a soft attractor. */
@@ -319,7 +445,15 @@ export class Society {
   }
 
   // ---- OFFICE: desk-work vs. drifting off to talk ---------------------------
-  private runOffice(rt: Runtime, dt: number, bossOnFloor: boolean, rng: RNG): void {
+  /** the midday commons drift: a soft attractor like workWindow, jittered per
+   *  agent. Only CO-LOCATION is authored — whether anything sparks stays with
+   *  maybeStartConversation's compatibility/rapport roll. */
+  private lunchWindow(rt: Runtime, hour: number): boolean {
+    const c = 12.5 + rt.jitter * 0.6;
+    return hour >= c - 0.4 && hour < c + 0.5;
+  }
+
+  private runOffice(rt: Runtime, dt: number, bossOnFloor: boolean, rng: RNG, hour: number): void {
     // already talking? hold the conversation; the convo stepper drives the reward.
     if (rt.convoPartner >= 0) {
       rt.mode = 'talking'; rt.activity = 'talk';
@@ -327,19 +461,21 @@ export class Society {
       return;
     }
     const boss = rt.entry.role === 'office_boss';
+    const lunch = !boss && this.lunchWindow(rt, hour);
     // felt task pressure: the base + the re-derived priority of this team's subgoal
     // (the goal→body feedback edge) + the boss walking your floor. So a team the boss
-    // has quietly elevated feels heavier even with no one saying a word.
-    const demand = boss ? 0.15 : 0.15 + this.company.demandFor(rt.team) + (bossOnFloor ? 0.45 : 0);
+    // has quietly elevated feels heavier even with no one saying a word. Lunch lifts it.
+    const demand = boss ? 0.15 : lunch ? 0.05 : 0.15 + this.company.demandFor(rt.team) + (bossOnFloor ? 0.45 : 0);
     // wandering the halls is itself a little stimulating (drains boredom slowly), so a
     // lone wanderer who never finds company eventually drifts back to the desk.
     const novelty = rt.mode === 'wandering' ? 0.3 : 0.05;
-    this.stepWp(rt, { onTask: rt.mode === 'desk_working', socializing: false, standing: false, resting: false, novelty, demand, dtHours: dt });
+    this.stepWp(rt, { onTask: rt.mode === 'desk_working' && !lunch, socializing: false, standing: false, resting: false, novelty, demand, dtHours: dt });
 
     const talkP = talkPropensity(rt.wp, rt.ch.soma);
     const workP = workPull(rt.wp, rt.ch.soma);
     // the office BOSS mostly works, but now and then walks the floor (which pressures
-    // the room). Everyone else trades desk-work against the pull to seek company.
+    // the room). Everyone else trades desk-work against the pull to seek company —
+    // and the lunch drift puts them at the commons daily whatever their boredom.
     if (boss) {
       if (rt.mode !== 'wandering' && rt.mode !== 'desk_working') rt.mode = 'desk_working'; // enter → sit
       if (rt.mode !== 'wandering' && rng() < 0.02 && rt.wp.boredom > 0.4) {
@@ -348,7 +484,7 @@ export class Society {
         rt.mode = 'desk_working';
       }
     } else {
-      const wantTalk = talkP > 0.5 && talkP > workP && !bossOnFloor;
+      const wantTalk = lunch || (talkP > 0.5 && talkP > workP && !bossOnFloor);
       if (rt.mode !== 'wandering' && wantTalk) {
         rt.mode = 'wandering';
         rt.station = this.pickCommons(rt.idx, rng);   // drift to a gathering spot to find company
@@ -412,7 +548,7 @@ export class Society {
   }
 
   // ===================== conversations =====================================
-  private matchmakeOffice(clock: number, rng: RNG): void {
+  private matchmakeOffice(clock: number, rng: RNG, civicTopics: string[]): void {
     if (this.convoCooldown > 0) return;
     // group office wanderers by their FLOOR + chosen commons spot; any two free,
     // compatible, interest-sharing wanderers at the same spot (hence the same floor)
@@ -431,7 +567,7 @@ export class Society {
       const a = this.rts[idxs[0]], b = this.rts[idxs[1]];
       const conv = maybeStartConversation(
         a.ch, b.ch, a.entry.interests, b.entry.interests,
-        a.ledger, b.ledger, clock, rng,
+        a.ledger, b.ledger, clock, rng, civicTopics,
       );
       if (conv) {
         a.convoPartner = b.idx; b.convoPartner = a.idx;
@@ -445,13 +581,26 @@ export class Society {
     }
   }
 
-  private stepConversations(dt: number, clock: number): void {
+  private stepConversations(dt: number, clock: number, civic: CivicEnv | null): void {
     for (let k = this.convos.length - 1; k >= 0; k--) {
       const c = this.convos[k];
       c.beatAcc += dt;
       while (c.beatAcc >= BEAT && !c.conv.done) { c.conv.step(BEAT); c.beatAcc -= BEAT; }
       // keep both partners parked together while the talk runs; surface the line.
       const a = this.rts[c.a], b = this.rts[c.b];
+      // a civic topic carries a stance payload ONCE per conversation: warmth ×
+      // trust is the persuasion gain (gov applies the deltas; we write the
+      // returned memories into both graphs — the world owns all memory writes).
+      if (civic && !c.civicDone && isCivicTopic(c.conv.topic)) {
+        c.civicDone = true;
+        const aId = a.entry.profile.id, bId = b.entry.profile.id;
+        const trustAB = a.ledger.get(bId)?.trust ?? 0.3;
+        const trustBA = b.ledger.get(aId)?.trust ?? 0.3;
+        const x = civic.onConversation(aId, bId, c.conv.topic, c.conv.lastWarm, trustAB, trustBA, clock);
+        if (x) this.civicExchanges++;
+        if (x?.memoryA) a.ch.memory.add(clock, x.memoryA, a.ch.soma);
+        if (x?.memoryB) b.ch.memory.add(clock, x.memoryB, b.ch.soma);
+      }
       if (a.convoPartner === c.b) { a.conversationWith = b.ch.profile.name; a.station = c.commons; a.saying = c.conv.lastUtterance; }
       if (b.convoPartner === c.a) { b.conversationWith = a.ch.profile.name; b.station = c.commons; b.saying = c.conv.lastUtterance; }
       if (c.conv.done) {
@@ -532,7 +681,7 @@ export class Society {
         activity: rt.activity,
         homeIndex: rt.entry.homeIndex,
         station: rt.station,
-        commuteT: 0,
+        commuteT: rt.place === 'commuting' ? rt.commuteT : 0,
         workpsych: { ...rt.wp },
         conversationWith: rt.conversationWith,
         saying: rt.saying,
@@ -558,10 +707,12 @@ export class Society {
         deskIndex: rt.deskIndex, team: rt.team, cleanWp: rt.cleanWp, atWork: rt.atWork,
         asleep: rt.asleep, phone: { ...rt.phone }, eventAcc: rt.eventAcc, jitter: rt.jitter,
         convoPartner: rt.convoPartner, conversationWith: rt.conversationWith, saying: rt.saying,
+        commuteFrom: rt.commuteFrom, commuteTo: rt.commuteTo, commuteT: rt.commuteT, commuteDur: rt.commuteDur,
         wp: { ...rt.wp }, ledger: [...rt.ledger.entries()],
       })),
-      convos: this.convos.map((c) => ({ a: c.a, b: c.b, beatAcc: c.beatAcc, commons: c.commons, conv: c.conv.toJSON() })),
+      convos: this.convos.map((c) => ({ a: c.a, b: c.b, beatAcc: c.beatAcc, commons: c.commons, civicDone: c.civicDone ? 1 : 0, conv: c.conv.toJSON() })),
       convoCooldown: this.convoCooldown, maraBelonging: this.maraBelonging, rolloverDay: this.rolloverDay,
+      civicExchanges: this.civicExchanges,
       company: this.company.toJSON(), feed: this.feedNet.toJSON(),
     };
   }
@@ -575,6 +726,8 @@ export class Society {
       rt.deskIndex = r.deskIndex; rt.team = r.team; rt.cleanWp = r.cleanWp; rt.atWork = r.atWork;
       rt.asleep = r.asleep; Object.assign(rt.phone, r.phone); rt.eventAcc = r.eventAcc; rt.jitter = r.jitter;
       rt.convoPartner = r.convoPartner; rt.conversationWith = r.conversationWith; rt.saying = r.saying;
+      rt.commuteFrom = r.commuteFrom ?? 'home'; rt.commuteTo = r.commuteTo ?? 'home';
+      rt.commuteT = r.commuteT ?? 0; rt.commuteDur = r.commuteDur ?? 0;
       Object.assign(rt.wp, r.wp);
       rt.ledger = new Map<string, Relationship>(r.ledger);
     });
@@ -585,9 +738,10 @@ export class Society {
     for (const c of j.convos) {
       const a = this.rts[c.a], b = this.rts[c.b];
       const conv = restoreConversation(a.ch, b.ch, a.ledger, b.ledger, townRng, c.conv);
-      this.convos.push({ conv, a: c.a, b: c.b, beatAcc: c.beatAcc, commons: c.commons });
+      this.convos.push({ conv, a: c.a, b: c.b, beatAcc: c.beatAcc, commons: c.commons, civicDone: c.civicDone === 1 });
     }
     this.convoCooldown = j.convoCooldown; this.maraBelonging = j.maraBelonging; this.rolloverDay = j.rolloverDay;
+    this.civicExchanges = j.civicExchanges ?? 0;
   }
 }
 
@@ -596,12 +750,14 @@ interface RuntimeJSON {
   deskIndex: number; team: number; cleanWp: number; atWork: boolean;
   asleep: boolean; phone: PhoneState; eventAcc: number; jitter: number;
   convoPartner: number; conversationWith?: string; saying?: string;
+  commuteFrom?: AgentPlace; commuteTo?: AgentPlace; commuteT?: number; commuteDur?: number;
   wp: ReturnType<typeof createWorkPsych>; ledger: [string, Relationship][];
 }
 export interface SocietyJSON {
   runtimes: RuntimeJSON[];
-  convos: { a: number; b: number; beatAcc: number; commons: number; conv: ConversationJSON }[];
+  convos: { a: number; b: number; beatAcc: number; commons: number; civicDone?: number; conv: ConversationJSON }[];
   convoCooldown: number; maraBelonging: number; rolloverDay: number;
+  civicExchanges?: number;
   company: CompanyJSON; feed: FeedJSON;
 }
 
